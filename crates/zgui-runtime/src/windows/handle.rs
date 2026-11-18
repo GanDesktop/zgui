@@ -87,6 +87,10 @@ pub(crate) struct WindowShared {
     pub(crate) input_region: RefCell<Option<Region>>,
     /// The last opaque region the application gave, if it gave one.
     pub(crate) opaque_region: RefCell<Option<Region>>,
+    /// External parent handle and modality applied before/after attach.
+    pub(crate) external_parent: RefCell<Option<(zgui_vocab::SharedString, bool)>>,
+    /// One-shot activation token queued before the surface attaches.
+    pub(crate) activation_token: RefCell<Option<zgui_vocab::SharedString>>,
 }
 
 /// A region in CSS pixels, or `None` for the whole window.
@@ -122,6 +126,8 @@ impl WindowHandle {
                 lock_keys: ArcRwSignal::new(Modifiers::NONE),
                 input_region: RefCell::new(None),
                 opaque_region: RefCell::new(None),
+                external_parent: RefCell::new(None),
+                activation_token: RefCell::new(None),
             }),
         }
     }
@@ -146,6 +152,12 @@ impl WindowHandle {
         }
         if let Some(region) = self.shared.opaque_region.borrow().as_ref() {
             surface.set_opaque_region(region.as_deref());
+        }
+        if let Some((parent, modal)) = self.shared.external_parent.borrow().as_ref() {
+            let _ = surface.set_external_parent(parent.as_str(), *modal);
+        }
+        if let Some(token) = self.shared.activation_token.borrow_mut().take() {
+            surface.activate_with_token(token.as_str());
         }
     }
 
@@ -564,6 +576,51 @@ impl WindowHandle {
     /// Asks the desktop to draw attention to this window, or stops asking.
     pub fn request_attention(&self, urgent: bool) {
         self.act(|surface| surface.request_attention(urgent));
+    }
+
+    /// Parents this window under an external desktop handle (`"wayland:<token>"` or
+    /// `"x11:<xid>"`) and optionally marks it modal.
+    ///
+    /// When called before the surface attaches, the handle is remembered and applied on open.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError::Unsupported`](zgui_platform::PlatformError::Unsupported) when
+    /// the attached backend cannot apply `parent`, or
+    /// [`PlatformError::Backend`](zgui_platform::PlatformError::Backend) when `parent` is
+    /// malformed.
+    pub fn set_external_parent(
+        &self,
+        parent: impl Into<zgui_vocab::SharedString>,
+        modal: bool,
+    ) -> Result<(), zgui_platform::PlatformError> {
+        let parent = parent.into();
+        *self.shared.external_parent.borrow_mut() = Some((parent.clone(), modal));
+        if let Some(surface) = self.surface() {
+            surface.set_external_parent(parent.as_str(), modal)?;
+        }
+        Ok(())
+    }
+
+    /// Passes an external activation token (`xdg-activation-v1` / desktop startup ID) for this
+    /// window.
+    pub fn activate_with_token(&self, token: impl Into<zgui_vocab::SharedString>) {
+        let token = token.into();
+        if token.is_empty() || self.shared.closed.get() {
+            return;
+        }
+        if let Some(surface) = self.surface() {
+            surface.activate_with_token(token.as_str());
+        } else {
+            *self.shared.activation_token.borrow_mut() = Some(token);
+        }
+    }
+
+    /// Opens the desktop's native window menu at window-local `position`, in CSS pixels.
+    pub fn show_window_menu(&self, position: Point<CssPx, Css>) {
+        self.act(|surface| {
+            let _ = surface.show_window_menu(position);
+        });
     }
 
     /// Begins a desktop-driven move of the window.

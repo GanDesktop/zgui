@@ -25,6 +25,13 @@ pub(crate) enum Wanted {
 impl WaylandState {
     /// Carries out every activation a surface asked for since the last turn.
     pub(crate) fn carry_out_activations(&mut self) {
+        for (surface, token) in self.link.take_activation_tokens() {
+            if let Some(activation) = &self.activation
+                && let Some(held) = self.live.surface(surface)
+            {
+                activation.activate::<Self>(held.wl_surface(), token);
+            }
+        }
         for (surface, focus) in self.link.take_activations() {
             self.activate(
                 surface,

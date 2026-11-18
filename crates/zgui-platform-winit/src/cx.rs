@@ -217,6 +217,9 @@ impl PlatformCx for WinitCx<'_> {
             Arc::clone(&self.shared.waker),
         ));
         surface.place_title_buttons();
+        if let Some((parent, modal)) = &attributes.external_parent {
+            let _ = surface.set_external_parent(parent.as_str(), *modal);
+        }
         #[cfg(target_os = "macos")]
         {
             if let Some(view) = crate::macos::ns_view(&window) {

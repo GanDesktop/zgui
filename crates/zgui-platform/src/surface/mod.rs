@@ -36,7 +36,7 @@ pub use crate::surface::watchdog::Watchdog;
 use accesskit::TreeUpdate;
 use zgui_geom::{Css, CssPx, Device, DevicePx, Point, Rect, Size};
 
-use crate::error::Unsupported;
+use crate::error::{PlatformError, Unsupported};
 use crate::theme::ColorScheme;
 
 /// A thing that can be drawn into and interacted with.
@@ -271,6 +271,34 @@ pub trait Surface: Send + Sync + 'static {
     /// entry, an urgency hint.
     fn request_attention(&self, urgent: bool) {
         let _ = urgent;
+    }
+
+    /// Parents this surface under an external desktop window handle (`"wayland:<token>"` or
+    /// `"x11:<xid>"`) and optionally marks it modal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError::Unsupported`] when this backend or surface role does not support
+    /// external parenting, or [`PlatformError::Backend`] when `parent` is malformed or rejected.
+    fn set_external_parent(&self, parent: &str, modal: bool) -> Result<(), PlatformError> {
+        let _ = (parent, modal);
+        Err(Unsupported.into())
+    }
+
+    /// Passes an external activation token (`xdg-activation-v1` / desktop startup ID) for this
+    /// surface.
+    fn activate_with_token(&self, token: &str) {
+        let _ = token;
+    }
+
+    /// Opens the desktop's native window menu at surface-local `position`, in CSS pixels.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unsupported`] when the surface or desktop has no native window menu.
+    fn show_window_menu(&self, position: Point<CssPx, Css>) -> Result<(), Unsupported> {
+        let _ = position;
+        Err(Unsupported)
     }
 
     /// Does what a double press on a title bar does.

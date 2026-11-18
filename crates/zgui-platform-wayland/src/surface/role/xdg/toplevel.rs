@@ -1,11 +1,17 @@
 //! An ordinary window, on the shell this backend binds itself.
 
+use std::sync::Mutex;
+
 use smithay_client_toolkit::reexports::client::protocol::wl_seat::WlSeat;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::{Connection, Dispatch, Proxy, QueueHandle};
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::{
     self, Mode, ZxdgToplevelDecorationV1,
 };
+use wayland_protocols::xdg::dialog::v1::client::xdg_dialog_v1::XdgDialogV1;
+use wayland_protocols::xdg::dialog::v1::client::xdg_wm_dialog_v1::XdgWmDialogV1;
+use wayland_protocols::xdg::foreign::zv2::client::zxdg_imported_v2::{self, ZxdgImportedV2};
+use wayland_protocols::xdg::foreign::zv2::client::zxdg_importer_v2::ZxdgImporterV2;
 use wayland_protocols::xdg::shell::client::xdg_surface::{self, XdgSurface};
 use wayland_protocols::xdg::shell::client::xdg_toplevel::{self, ResizeEdge, XdgToplevel};
 use zgui_geom::{Css, CssPx, Size};
@@ -14,6 +20,24 @@ use zgui_platform::{DecorationSource, Decorations, SurfaceId};
 use crate::driver::WaylandState;
 use crate::surface::role::xdg::XdgShell;
 use crate::surface::role::xdg::configure::Pending;
+
+/// Imported foreign parent and dialog objects, destroyed together when detached or dropped.
+#[derive(Debug, Default)]
+struct ExternalParent {
+    imported: Option<ZxdgImportedV2>,
+    dialog: Option<XdgDialogV1>,
+}
+
+impl ExternalParent {
+    fn clear(&mut self) {
+        if let Some(dialog) = self.dialog.take() {
+            dialog.destroy();
+        }
+        if let Some(imported) = self.imported.take() {
+            imported.destroy();
+        }
+    }
+}
 
 /// A window: the surface, the shell object over it, and the frame the compositor draws.
 #[derive(Debug)]
@@ -26,6 +50,8 @@ pub struct Toplevel {
     toplevel: XdgToplevel,
     /// The frame the compositor draws, where it is willing to.
     decoration: Option<ZxdgToplevelDecorationV1>,
+    /// External parent import and modal dialog state, when attached.
+    external_parent: Mutex<ExternalParent>,
 }
 
 impl Toplevel {
@@ -53,6 +79,7 @@ impl Toplevel {
             xdg,
             toplevel,
             decoration,
+            external_parent: Mutex::new(ExternalParent::default()),
         }
     }
 
@@ -152,14 +179,63 @@ impl Toplevel {
     pub fn begin_resize(&self, seat: &WlSeat, serial: u32, edge: ResizeEdge) {
         self.toplevel.resize(seat, serial, edge);
     }
+
+    /// Asks the compositor to show the native window menu at surface-local `(x, y)`.
+    pub fn show_window_menu(&self, seat: &WlSeat, serial: u32, x: i32, y: i32) {
+        self.toplevel.show_window_menu(seat, serial, x, y);
+    }
+
+    /// Imports `handle` via `zxdg_importer_v2` and sets it as this toplevel's parent.
+    pub fn set_external_parent(
+        &self,
+        qh: &QueueHandle<WaylandState>,
+        id: SurfaceId,
+        importer: &ZxdgImporterV2,
+        wm_dialog: Option<&XdgWmDialogV1>,
+        handle: &str,
+        modal: bool,
+    ) {
+        let mut parent = self
+            .external_parent
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        parent.clear();
+        let imported = importer.import_toplevel(handle.to_owned(), qh, id);
+        imported.set_parent_of(&self.wl);
+        parent.imported = Some(imported);
+        if modal && let Some(wm_dialog) = wm_dialog {
+            let dialog = wm_dialog.get_xdg_dialog(&self.toplevel, qh, id);
+            dialog.set_modal();
+            parent.dialog = Some(dialog);
+        }
+    }
+
+    /// Drops the matching imported handle when the external parent is destroyed by the compositor.
+    pub fn clear_imported_parent(&self, target: &ZxdgImportedV2) {
+        let mut parent = self
+            .external_parent
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if parent
+            .imported
+            .as_ref()
+            .is_some_and(|current| current == target)
+        {
+            parent.clear();
+        }
+    }
 }
 
 impl Drop for Toplevel {
     /// Takes the objects down innermost first.
     ///
     /// Order is not a preference: a role object outliving the shell object it was made from is a
-    /// protocol error rather than a leak, and so is a decoration outliving its role.
+    /// protocol error rather than a leak, and so is a decoration or dialog outliving its role.
     fn drop(&mut self) {
+        self.external_parent
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         if let Some(decoration) = &self.decoration {
             decoration.destroy();
         }
@@ -271,5 +347,35 @@ impl Dispatch<ZxdgToplevelDecorationV1, SurfaceId> for WaylandState {
         {
             state.decorated_by(*id, source(mode));
         }
+    }
+}
+
+impl Dispatch<ZxdgImportedV2, SurfaceId> for WaylandState {
+    fn event(
+        state: &mut Self,
+        imported: &ZxdgImportedV2,
+        event: <ZxdgImportedV2 as Proxy>::Event,
+        id: &SurfaceId,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let zxdg_imported_v2::Event::Destroyed = event
+            && let Some(surface) = state.live.surface(*id)
+            && let Some(window) = surface.role().window()
+        {
+            window.clear_imported_parent(imported);
+        }
+    }
+}
+
+impl Dispatch<XdgDialogV1, SurfaceId> for WaylandState {
+    fn event(
+        _state: &mut Self,
+        _dialog: &XdgDialogV1,
+        _event: <XdgDialogV1 as Proxy>::Event,
+        _id: &SurfaceId,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
     }
 }

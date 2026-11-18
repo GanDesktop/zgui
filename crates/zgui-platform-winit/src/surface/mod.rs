@@ -11,12 +11,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use accesskit::TreeUpdate;
+use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
 use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::window::Window;
 use zgui_geom::{Css, CssPx, Device, DevicePx, Point, Size};
 use zgui_platform::{
-    ColorScheme, CursorStyle, Decorations, FullscreenMode, GpuSurface, ResizeEdge, Surface,
-    SurfaceId, TextInput, TitleButtons, Unsupported, WindowIcon, WindowLevel,
+    ColorScheme, CursorStyle, Decorations, FullscreenMode, GpuSurface, PlatformError, ResizeEdge,
+    Surface, SurfaceId, TextInput, TitleButtons, Unsupported, WindowIcon, WindowLevel,
 };
 
 use crate::waker::ProxyWaker;
@@ -249,6 +250,42 @@ impl Surface for WinitSurface {
             .request_user_attention(urgent.then_some(winit::window::UserAttentionType::Critical));
     }
 
+    fn set_external_parent(&self, parent: &str, modal: bool) -> Result<(), PlatformError> {
+        set_external_parent_impl(&self.window, parent, modal)
+    }
+
+    fn activate_with_token(&self, token: &str) {
+        if token.is_empty() {
+            return;
+        }
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        set_x11_startup_id(&self.window, token);
+        self.window.focus_window();
+    }
+
+    fn show_window_menu(&self, position: Point<CssPx, Css>) -> Result<(), Unsupported> {
+        let supported = self.window.window_handle().is_ok_and(|handle| {
+            matches!(
+                handle.as_raw(),
+                RawWindowHandle::Wayland(_) | RawWindowHandle::Win32(_)
+            )
+        });
+        if !supported {
+            return Err(Unsupported);
+        }
+        self.window.show_window_menu(LogicalPosition::new(
+            f64::from(position.x.0),
+            f64::from(position.y.0),
+        ));
+        Ok(())
+    }
+
     #[cfg(target_os = "macos")]
     fn title_bar_double_click(&self) {
         crate::macos::title_bar_double_click(&self.window);
@@ -315,5 +352,225 @@ impl Surface for WinitSurface {
 
     fn gpu_shared(self: Arc<Self>) -> Option<Arc<dyn GpuSurface>> {
         Some(self)
+    }
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+fn parse_x11_parent(parent: &str) -> Result<u32, PlatformError> {
+    let Some(raw) = parent.strip_prefix("x11:") else {
+        if parent.starts_with("wayland:") {
+            return Err(PlatformError::Unsupported(Unsupported));
+        }
+        return Err(PlatformError::Backend(format!(
+            "unsupported external parent handle: {parent}"
+        )));
+    };
+    let trimmed = raw.trim();
+    let xid = if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        u32::from_str_radix(hex, 16)
+    } else {
+        trimmed.parse::<u32>()
+    }
+    .map_err(|_| PlatformError::Backend(format!("invalid X11 parent XID: {parent}")))?;
+    if xid == 0 {
+        return Err(PlatformError::Backend(
+            "X11 parent XID must be nonzero".to_owned(),
+        ));
+    }
+    Ok(xid)
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+fn set_external_parent_impl(
+    window: &Window,
+    parent: &str,
+    modal: bool,
+) -> Result<(), PlatformError> {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{
+        AtomEnum, CLIENT_MESSAGE_EVENT, ClientMessageEvent, ConnectionExt as _, EventMask, PropMode,
+    };
+    use x11rb::wrapper::ConnectionExt as _;
+
+    let parent_xid = parse_x11_parent(parent)?;
+    let child_xid = match window.window_handle() {
+        Ok(handle) => match handle.as_raw() {
+            RawWindowHandle::Xlib(xlib) => u32::try_from(xlib.window)
+                .map_err(|_| PlatformError::Backend("Xlib window ID overflow".to_owned()))?,
+            RawWindowHandle::Xcb(xcb) => xcb.window.get(),
+            _ => return Err(PlatformError::Unsupported(Unsupported)),
+        },
+        Err(_) => return Err(PlatformError::Unsupported(Unsupported)),
+    };
+
+    let (conn, screen_num) = x11rb::rust_connection::RustConnection::connect(None)
+        .map_err(|err| PlatformError::Backend(format!("x11 connect failed: {err}")))?;
+    conn.change_property32(
+        PropMode::REPLACE,
+        child_xid,
+        AtomEnum::WM_TRANSIENT_FOR,
+        AtomEnum::WINDOW,
+        &[parent_xid],
+    )
+    .map_err(|err| PlatformError::Backend(err.to_string()))?;
+
+    let wm_state = conn
+        .intern_atom(false, b"_NET_WM_STATE")
+        .map_err(|err| PlatformError::Backend(err.to_string()))?
+        .reply()
+        .map_err(|err| PlatformError::Backend(err.to_string()))?
+        .atom;
+    let wm_state_modal = conn
+        .intern_atom(false, b"_NET_WM_STATE_MODAL")
+        .map_err(|err| PlatformError::Backend(err.to_string()))?
+        .reply()
+        .map_err(|err| PlatformError::Backend(err.to_string()))?
+        .atom;
+
+    let mut states: Vec<u32> = conn
+        .get_property(false, child_xid, wm_state, AtomEnum::ATOM, 0, 64)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .and_then(|r| r.value32().map(|v| v.collect()))
+        .unwrap_or_default();
+    if modal {
+        if !states.contains(&wm_state_modal) {
+            states.push(wm_state_modal);
+        }
+    } else {
+        states.retain(|&atom| atom != wm_state_modal);
+    }
+    conn.change_property32(
+        PropMode::REPLACE,
+        child_xid,
+        wm_state,
+        AtomEnum::ATOM,
+        &states,
+    )
+    .map_err(|err| PlatformError::Backend(err.to_string()))?;
+
+    if let Some(screen) = conn.setup().roots.get(screen_num) {
+        let msg = ClientMessageEvent {
+            response_type: CLIENT_MESSAGE_EVENT,
+            format: 32,
+            sequence: 0,
+            window: child_xid,
+            type_: wm_state,
+            data: [u32::from(modal), wm_state_modal, 0, 1, 0].into(),
+        };
+        let _ = conn.send_event(
+            false,
+            screen.root,
+            EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
+            msg,
+        );
+    }
+    conn.flush()
+        .map_err(|err| PlatformError::Backend(err.to_string()))?;
+    Ok(())
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+)))]
+fn set_external_parent_impl(
+    _window: &Window,
+    _parent: &str,
+    _modal: bool,
+) -> Result<(), PlatformError> {
+    Err(PlatformError::Unsupported(Unsupported))
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+fn set_x11_startup_id(window: &Window, token: &str) {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, PropMode};
+    use x11rb::wrapper::ConnectionExt as _;
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let child_xid = match handle.as_raw() {
+        RawWindowHandle::Xlib(xlib) => match u32::try_from(xlib.window) {
+            Ok(id) => id,
+            Err(_) => return,
+        },
+        RawWindowHandle::Xcb(xcb) => xcb.window.get(),
+        _ => return,
+    };
+    let Ok((conn, _)) = x11rb::rust_connection::RustConnection::connect(None) else {
+        return;
+    };
+    if let Ok(cookie) = conn.intern_atom(false, b"_NET_STARTUP_ID")
+        && let Ok(reply) = cookie.reply()
+        && let Ok(utf8_cookie) = conn.intern_atom(false, b"UTF8_STRING")
+        && let Ok(utf8_reply) = utf8_cookie.reply()
+    {
+        let _ = conn.change_property8(
+            PropMode::REPLACE,
+            child_xid,
+            reply.atom,
+            if utf8_reply.atom != 0 {
+                utf8_reply.atom
+            } else {
+                AtomEnum::STRING.into()
+            },
+            token.as_bytes(),
+        );
+        let _ = conn.flush();
+    }
+}
+
+#[cfg(all(
+    test,
+    any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )
+))]
+mod tests {
+    use super::parse_x11_parent;
+    use zgui_platform::PlatformError;
+
+    #[test]
+    fn parses_decimal_and_hex_x11_parent_handles() {
+        assert_eq!(parse_x11_parent("x11:12345"), Ok(12345));
+        assert_eq!(parse_x11_parent("x11:0x1a2b"), Ok(0x1a2b));
+        assert!(matches!(
+            parse_x11_parent("wayland:abc"),
+            Err(PlatformError::Unsupported(_))
+        ));
+        assert!(matches!(
+            parse_x11_parent("x11:0"),
+            Err(PlatformError::Backend(_))
+        ));
     }
 }

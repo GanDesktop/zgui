@@ -268,6 +268,8 @@ impl WaylandState {
             ping: self.live.waker.ping(),
             seat: std::sync::Arc::clone(&self.link),
             shell: std::sync::Arc::clone(&self.xdg),
+            importer: self.extras.importer.clone(),
+            wm_dialog: self.extras.wm_dialog.clone(),
             waker: std::sync::Arc::clone(&self.live.waker)
                 as std::sync::Arc<dyn zgui_platform::Waker>,
         }
@@ -299,6 +301,16 @@ fn apply(surface: &Arc<WaylandSurface>, attributes: &SurfaceAttributes) {
         } else {
             let fixed = attributes.size;
             window.set_bounds(fixed, fixed);
+        }
+        if let Some((parent, modal)) = &attributes.external_parent {
+            let _ = zgui_platform::Surface::set_external_parent(
+                surface.as_ref(),
+                parent.as_str(),
+                *modal,
+            );
+        }
+        if let Some(token) = &attributes.activation_token {
+            zgui_platform::Surface::activate_with_token(surface.as_ref(), token.as_str());
         }
     }
 }

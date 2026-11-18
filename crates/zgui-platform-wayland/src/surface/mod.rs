@@ -26,10 +26,12 @@ use smithay_client_toolkit::reexports::client::{Connection, QueueHandle};
 use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_region::WlRegion;
 use wayland_client::protocol::wl_surface::WlSurface;
-use zgui_geom::{Css, CssPx, Device, DevicePx, Rect, Size};
+use wayland_protocols::xdg::dialog::v1::client::xdg_wm_dialog_v1::XdgWmDialogV1;
+use wayland_protocols::xdg::foreign::zv2::client::zxdg_importer_v2::ZxdgImporterV2;
+use zgui_geom::{Css, CssPx, Device, DevicePx, Point, Rect, Size};
 use zgui_platform::{
-    CursorStyle, Decorations, FullscreenMode, GpuSurface, PresentPacing, PresentationTiming,
-    Surface, SurfaceId, TextInput, Unsupported,
+    CursorStyle, Decorations, FullscreenMode, GpuSurface, PlatformError, PresentPacing,
+    PresentationTiming, Surface, SurfaceId, TextInput, Unsupported,
 };
 
 use crate::driver::WaylandState;
@@ -60,6 +62,10 @@ pub struct Links {
     pub waker: Arc<dyn zgui_platform::Waker>,
     /// The shell a pop-up's later requests are made against.
     pub shell: Arc<crate::surface::role::xdg::XdgShell>,
+    /// Optional `zxdg_importer_v2` for importing external parent handles.
+    pub importer: Option<ZxdgImporterV2>,
+    /// Optional `xdg_wm_dialog_v1` for marking parented toplevels modal.
+    pub wm_dialog: Option<XdgWmDialogV1>,
 }
 
 impl core::fmt::Debug for Links {
@@ -111,6 +117,10 @@ pub struct WaylandSurface {
     reposition_token: std::sync::atomic::AtomicU32,
     /// The shell a reposition is made against.
     shell: Arc<crate::surface::role::xdg::XdgShell>,
+    /// Optional `zxdg_importer_v2` for external parent attachment.
+    importer: Option<ZxdgImporterV2>,
+    /// Optional `xdg_wm_dialog_v1` for modal dialog state.
+    wm_dialog: Option<XdgWmDialogV1>,
     /// The channel an assistive technology talks to.
     a11y: A11y,
     /// The seat's own requests, which belong to the loop rather than to this surface.
@@ -149,6 +159,8 @@ impl WaylandSurface {
             parent_extent,
             reposition_token: std::sync::atomic::AtomicU32::new(1),
             shell: links.shell,
+            importer: links.importer,
+            wm_dialog: links.wm_dialog,
             a11y: A11y::open(id, links.waker),
             seat: links.seat,
         })
@@ -675,6 +687,50 @@ impl Surface for WaylandSurface {
         if urgent {
             self.seat.activate(self.id, false);
         }
+    }
+
+    fn set_external_parent(&self, parent: &str, modal: bool) -> Result<(), PlatformError> {
+        let Some(window) = self.role.window() else {
+            return Err(PlatformError::Unsupported(Unsupported));
+        };
+        let Some(handle) = parent.strip_prefix("wayland:") else {
+            if parent.starts_with("x11:") {
+                return Err(PlatformError::Unsupported(Unsupported));
+            }
+            return Err(PlatformError::Backend(format!(
+                "unsupported external parent handle: {parent}"
+            )));
+        };
+        if handle.is_empty() {
+            return Err(PlatformError::Backend(
+                "Wayland external parent handle is empty".to_owned(),
+            ));
+        }
+        let Some(importer) = &self.importer else {
+            return Err(PlatformError::Unsupported(Unsupported));
+        };
+        window.set_external_parent(
+            &self.qh,
+            self.id,
+            importer,
+            self.wm_dialog.as_ref(),
+            handle,
+            modal,
+        );
+        let _ = self.conn.flush();
+        self.ping.ping();
+        Ok(())
+    }
+
+    fn activate_with_token(&self, token: &str) {
+        if !token.is_empty() {
+            self.seat.activate_with_token(self.id, token.to_owned());
+            self.ping.ping();
+        }
+    }
+
+    fn show_window_menu(&self, position: Point<CssPx, Css>) -> Result<(), Unsupported> {
+        chrome::show_window_menu(self, position)
     }
 
     fn set_cursor(&self, cursor: CursorStyle) {

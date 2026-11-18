@@ -69,6 +69,10 @@ pub struct SurfaceAttributes {
     pub title_buttons: Option<TitleButtons>,
     /// Whether the surface composes its next frame before the platform is ready to show it.
     pub compose_ahead: ComposeAhead,
+    /// An external parent window handle (`"wayland:<token>"` or `"x11:<xid>"`) and modality.
+    pub external_parent: Option<(SharedString, bool)>,
+    /// Startup activation token (`xdg-activation-v1` / desktop startup ID).
+    pub activation_token: Option<SharedString>,
 }
 
 /// Where the window buttons sit over a window that has no title bar.
@@ -114,6 +118,8 @@ impl SurfaceAttributes {
             theme: None,
             title_buttons: None,
             compose_ahead: ComposeAhead::Auto,
+            external_parent: None,
+            activation_token: None,
         }
     }
 

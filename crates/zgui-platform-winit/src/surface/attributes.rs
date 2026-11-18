@@ -55,7 +55,38 @@ pub(crate) fn window(
     if let Some(id) = &attributes.application_id {
         window = application_name(window, id.as_str());
     }
+    if let Some(token) = &attributes.activation_token {
+        window = startup_token(window, token.as_str());
+    }
     title_bar(window, attributes.decorations)
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+fn startup_token(window: WindowAttributes, token: &str) -> WindowAttributes {
+    use winit::platform::startup_notify::WindowAttributesExtStartupNotify as _;
+    use winit::window::ActivationToken;
+
+    if token.is_empty() {
+        return window;
+    }
+    window.with_activation_token(ActivationToken::from_raw(token.to_owned()))
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+)))]
+fn startup_token(window: WindowAttributes, _token: &str) -> WindowAttributes {
+    window
 }
 
 /// Applies a frame that carries no title bar.

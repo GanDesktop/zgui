@@ -62,6 +62,8 @@ struct State {
     serial: u32,
     /// The activations asked for and not yet carried out.
     asked: Vec<(SurfaceId, bool)>,
+    /// External activation tokens passed to surfaces and not yet sent to the compositor.
+    tokens: Vec<(SurfaceId, String)>,
 }
 
 impl core::fmt::Debug for State {
@@ -261,9 +263,28 @@ impl SeatLink {
         self.lock().asked.push((surface, focus));
     }
 
+    /// Queues an external activation token for `surface` to send on the next loop turn.
+    pub fn activate_with_token(&self, surface: SurfaceId, token: String) {
+        self.lock().tokens.push((surface, token));
+    }
+
     /// Takes every activation asked for since the last turn.
     pub(crate) fn take_activations(&self) -> Vec<(SurfaceId, bool)> {
         std::mem::take(&mut self.lock().asked)
+    }
+
+    /// Takes every external activation token queued since the last turn.
+    pub(crate) fn take_activation_tokens(&self) -> Vec<(SurfaceId, String)> {
+        std::mem::take(&mut self.lock().tokens)
+    }
+
+    /// The seat and serial a window menu request may quote.
+    pub fn menu(&self) -> Result<(WlSeat, u32), Unsupported> {
+        let inner = self.lock();
+        match (inner.seat.clone(), inner.grab) {
+            (Some(seat), Some(serial)) => Ok((seat, serial)),
+            _ => Err(Unsupported),
+        }
     }
 
     /// The seat and serial a drag started by `surface` may quote.

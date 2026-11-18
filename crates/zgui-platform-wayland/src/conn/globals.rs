@@ -2,24 +2,25 @@
 
 use smithay_client_toolkit::globals::GlobalData;
 use smithay_client_toolkit::reexports::client::globals::GlobalList;
-use smithay_client_toolkit::reexports::client::{Dispatch, QueueHandle};
+use smithay_client_toolkit::reexports::client::{Connection, Dispatch, Proxy, QueueHandle};
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
+use wayland_protocols::xdg::dialog::v1::client::xdg_wm_dialog_v1::XdgWmDialogV1;
+use wayland_protocols::xdg::foreign::zv2::client::zxdg_importer_v2::ZxdgImporterV2;
 
 use crate::driver::WaylandState;
 
 /// The optional protocols the toolkit has no wrapper for.
-///
-/// Both are how a surface is drawn at a scale that is not a whole number, and they only work
-/// together: the fractional scale says what the compositor wants, and the viewport is the only way
-/// to say that a buffer of one extent should appear at another. A compositor offering one without
-/// the other leaves the surface on whole-number scaling, which is why they are read as a pair.
 #[derive(Debug, Default)]
 pub struct Extras {
     /// `wp_fractional_scale_manager_v1`: what scale the compositor wants for a surface.
     pub fractional_scale: Option<WpFractionalScaleManagerV1>,
     /// `wp_viewporter`: the mapping from a buffer's extent to the extent it appears at.
     pub viewporter: Option<WpViewporter>,
+    /// `zxdg_importer_v2`: imports external toplevel handles so dialogs can parent to them.
+    pub importer: Option<ZxdgImporterV2>,
+    /// `xdg_wm_dialog_v1`: marks a toplevel as a modal dialog of its parent.
+    pub wm_dialog: Option<XdgWmDialogV1>,
 }
 
 impl Extras {
@@ -30,6 +31,8 @@ impl Extras {
     pub fn bind(globals: &GlobalList, qh: &QueueHandle<WaylandState>) -> Self {
         let fractional_scale = bind(globals, qh);
         let viewporter = bind(globals, qh);
+        let importer = bind(globals, qh);
+        let wm_dialog = bind(globals, qh);
         if fractional_scale.is_some() != viewporter.is_some() {
             tracing::debug!(
                 fractional_scale = fractional_scale.is_some(),
@@ -40,6 +43,8 @@ impl Extras {
         Self {
             fractional_scale,
             viewporter,
+            importer,
+            wm_dialog,
         }
     }
 
@@ -56,4 +61,28 @@ where
     WaylandState: Dispatch<I, GlobalData>,
 {
     globals.bind(qh, 1..=1, GlobalData).ok()
+}
+
+impl Dispatch<ZxdgImporterV2, GlobalData> for WaylandState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZxdgImporterV2,
+        _event: <ZxdgImporterV2 as Proxy>::Event,
+        _data: &GlobalData,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<XdgWmDialogV1, GlobalData> for WaylandState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &XdgWmDialogV1,
+        _event: <XdgWmDialogV1 as Proxy>::Event,
+        _data: &GlobalData,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
 }

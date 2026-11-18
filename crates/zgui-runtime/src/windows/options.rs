@@ -214,6 +214,20 @@ impl WindowOptions {
     pub fn attributes(&self) -> &SurfaceAttributes {
         &self.attributes
     }
+
+    /// Parents this window under an external desktop handle (`"wayland:<token>"` or
+    /// `"x11:<xid>"`) and optionally marks it modal.
+    pub fn with_external_parent(mut self, parent: impl Into<SharedString>, modal: bool) -> Self {
+        self.attributes.external_parent = Some((parent.into(), modal));
+        self
+    }
+
+    /// Supplies an external activation token (`xdg-activation-v1` / desktop startup ID) to
+    /// pass to the desktop when opening.
+    pub fn with_activation_token(mut self, token: impl Into<SharedString>) -> Self {
+        self.attributes.activation_token = Some(token.into());
+        self
+    }
 }
 
 impl core::fmt::Debug for WindowOptions {
@@ -250,6 +264,25 @@ mod tests {
                 .as_ref()
                 .map(|id| id.as_str()),
             Some("app-settings")
+        );
+        let dialog = WindowOptions::new("dialog")
+            .with_external_parent("wayland:abc", true)
+            .with_activation_token("tok-1");
+        assert_eq!(
+            dialog
+                .attributes()
+                .external_parent
+                .as_ref()
+                .map(|(p, m)| (p.as_str(), *m)),
+            Some(("wayland:abc", true))
+        );
+        assert_eq!(
+            dialog
+                .attributes()
+                .activation_token
+                .as_ref()
+                .map(|t| t.as_str()),
+            Some("tok-1")
         );
     }
 
