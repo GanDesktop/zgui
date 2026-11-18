@@ -66,6 +66,8 @@ pub struct Links {
     pub importer: Option<ZxdgImporterV2>,
     /// Optional `xdg_wm_dialog_v1` for marking parented toplevels modal.
     pub wm_dialog: Option<XdgWmDialogV1>,
+    /// Compositor DRM render-device hint captured during initial dmabuf feedback.
+    pub compositor_gpu_hint: Option<zgui_platform::CompositorGpuHint>,
 }
 
 impl core::fmt::Debug for Links {
@@ -121,6 +123,8 @@ pub struct WaylandSurface {
     importer: Option<ZxdgImporterV2>,
     /// Optional `xdg_wm_dialog_v1` for modal dialog state.
     wm_dialog: Option<XdgWmDialogV1>,
+    /// Compositor DRM render-device hint copied for renderer initialization and recovery.
+    compositor_gpu_hint: Option<zgui_platform::CompositorGpuHint>,
     /// The channel an assistive technology talks to.
     a11y: A11y,
     /// The seat's own requests, which belong to the loop rather than to this surface.
@@ -161,6 +165,7 @@ impl WaylandSurface {
             shell: links.shell,
             importer: links.importer,
             wm_dialog: links.wm_dialog,
+            compositor_gpu_hint: links.compositor_gpu_hint,
             a11y: A11y::open(id, links.waker),
             seat: links.seat,
         })
@@ -786,5 +791,9 @@ impl Surface for WaylandSurface {
 
     fn gpu_shared(self: Arc<Self>) -> Option<Arc<dyn GpuSurface>> {
         Some(self)
+    }
+
+    fn compositor_gpu_hint(&self) -> Option<zgui_platform::CompositorGpuHint> {
+        self.compositor_gpu_hint
     }
 }

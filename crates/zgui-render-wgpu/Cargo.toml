@@ -33,6 +33,11 @@ zgui-render = { path = "../zgui-render", version = "0.1.0" }
 zgui-scene = { path = "../zgui-scene", version = "0.1.0" }
 zgui-wgsl = { path = "../zgui-wgsl", version = "0.1.0" }
 
+# Direct exclusive Vulkan instance setup (`VK_LUNARG_direct_driver_loading`) on Linux hybrid GPUs
+# avoids waking a runtime-suspended dGPU through the Vulkan Loader's all-ICD probe.
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading.workspace = true
+
 # Parsing the shaders once per build rather than once per launch. The text comes from zgui-wgsl,
 # which is where an application's own shader reads it from too.
 [build-dependencies]

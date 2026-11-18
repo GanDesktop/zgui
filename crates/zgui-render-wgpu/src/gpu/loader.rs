@@ -8,6 +8,13 @@
 
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Whether [`prefer_hardware_vulkan`] set [`DISABLE_VARIABLE`] to [`SOFTWARE_DRIVER`] in this
+/// process.
+#[cfg(target_os = "linux")]
+static APPLIED_SOFTWARE_DISABLE: AtomicBool = AtomicBool::new(false);
 
 /// The loader variable that excludes drivers by manifest file name.
 #[cfg(target_os = "linux")]
@@ -18,8 +25,20 @@ const DISABLE_VARIABLE: &str = "VK_LOADER_DRIVERS_DISABLE";
 const SOFTWARE_NAME: &str = "lvp";
 
 /// The value given to [`DISABLE_VARIABLE`].
-#[cfg(target_os = "linux")]
-const SOFTWARE_DRIVER: &str = "*lvp*";
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const SOFTWARE_DRIVER: &str = "*lvp*";
+
+/// Returns `true` when [`prefer_hardware_vulkan`] itself set `VK_LOADER_DRIVERS_DISABLE=*lvp*`.
+pub(crate) fn applied_software_disable() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        APPLIED_SOFTWARE_DISABLE.load(Ordering::Relaxed)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
 
 /// The loader variables that select drivers. When one of them is set, the user has chosen, and
 /// this module changes nothing.
@@ -55,6 +74,7 @@ pub fn prefer_hardware_vulkan() -> bool {
         // SAFETY: the process has one thread, checked immediately above, so no other thread can
         // read or write the environment at the same time.
         unsafe { std::env::set_var(DISABLE_VARIABLE, SOFTWARE_DRIVER) };
+        APPLIED_SOFTWARE_DISABLE.store(true, Ordering::Relaxed);
         tracing::debug!("the software Vulkan driver is excluded: a hardware driver is installed");
         true
     }

@@ -6243,6 +6243,7 @@ dependencies = [
  "bincode",
  "bytemuck",
  "futures",
+ "libloading",
  "naga",
  "rustc-hash 2.1.3",
  "tracing",

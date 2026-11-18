@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use zgui_platform::{PlatformError, Surface};
 use zgui_render::{RenderTarget, Renderer};
-use zgui_render_wgpu::{GroupPrecision, PresentPacing, SharedGraphics, renderer::PrePresent};
+use zgui_render_wgpu::{
+    CompositorGpuHint, GroupPrecision, PresentPacing, SharedGraphics, renderer::PrePresent,
+};
 use zgui_runtime::{AppError, RendererFactory};
 
 /// The compositor notification belonging to `surface`, kept alive with it.
@@ -97,11 +99,17 @@ fn renderer(
     // window's handles go to the renderer rather than the other way round. The shared handle keeps
     // the window alive for as long as anything draws through it.
     let pacing = pacing_of(surface);
-    let mut renderer = graphics.renderer_for_surface(
+    let gpu_hint = surface.compositor_gpu_hint().map(|hint| CompositorGpuHint {
+        drm_render_dev: hint.drm_render_dev,
+        vendor_id: hint.vendor_id,
+        device_id: hint.device_id,
+    });
+    let mut renderer = graphics.renderer_for_surface_with_hint(
         target,
         handles,
         pacing,
         notify_wanted(pacing).then(|| pre_present(surface)),
+        gpu_hint,
     )?;
     // A platform that paces its own frames also decides when a composed frame is handed over.
     if pacing == PresentPacing::Platform {

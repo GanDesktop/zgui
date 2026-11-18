@@ -160,7 +160,10 @@ const LEDGER: &[(&str, &[&str])] = &[
     // has to start where neither the library nor its data files exist. `zgui-seat` opens libseat,
     // because it has to start where no session daemon answers. `zgui-libinput` opens libinput,
     // because it has to start where that library is absent and read the devices itself.
-    ("libloading", &["zgui-xkb", "zgui-seat", "zgui-libinput"]),
+    (
+        "libloading",
+        &["zgui-xkb", "zgui-seat", "zgui-libinput", "zgui-render-wgpu"],
+    ),
     (
         "accesskit",
         &[

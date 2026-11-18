@@ -20,7 +20,7 @@ pub use crate::surface::chrome::{
 };
 pub use crate::surface::drag::DragEvent;
 pub use crate::surface::event::{CloseReason, SurfaceEvent};
-pub use crate::surface::gpu::GpuSurface;
+pub use crate::surface::gpu::{CompositorGpuHint, GpuSurface};
 pub use crate::surface::icon::{BadIcon, WindowIcon};
 pub use crate::surface::id::SurfaceId;
 pub use crate::surface::role::{
@@ -406,6 +406,14 @@ pub trait Surface: Send + Sync + 'static {
     /// It cannot be derived from [`Surface::gpu`]: nothing can turn a shared handle to one trait
     /// into a shared handle to another, so each backend states it once.
     fn gpu_shared(self: std::sync::Arc<Self>) -> Option<std::sync::Arc<dyn GpuSurface>> {
+        None
+    }
+
+    /// Returns the compositor's GPU identity hint for this surface, if known.
+    ///
+    /// Copies the hint rather than consuming it so secondary windows and
+    /// device-loss recovery retain the compositor GPU identity.
+    fn compositor_gpu_hint(&self) -> Option<CompositorGpuHint> {
         None
     }
 }

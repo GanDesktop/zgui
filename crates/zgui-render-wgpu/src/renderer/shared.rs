@@ -40,6 +40,7 @@ use zgui_render::{GpuUnavailable, RenderTarget};
 
 use crate::gpu::adapter;
 use crate::gpu::device::Gpu;
+use crate::gpu::direct_vulkan::{self, CompositorGpuHint};
 use crate::gpu::formats::Formats;
 use crate::gpu::surface::{ConfiguredSurface, PresentPacing, SurfaceSetup};
 use crate::pipeline::Pipelines;
@@ -98,6 +99,8 @@ pub struct SharedGraphics(Rc<Shared>);
 struct Shared {
     /// One instance per backend tier, each created when the candidate loop reaches it.
     instances: adapter::Instances,
+    /// Optional compositor GPU hint preserved across secondary windows and recovery.
+    compositor_gpu_hint: RefCell<Option<CompositorGpuHint>>,
     /// Which backends may be enumerated.
     backends: wgpu::Backends,
     /// The Vulkan device extensions every device opened here asks for.
@@ -175,6 +178,7 @@ impl SharedGraphics {
     ) -> Self {
         Self(Rc::new(Shared {
             instances: adapter::Instances::new(backends),
+            compositor_gpu_hint: RefCell::new(None),
             backends,
             extensions,
             adopted: false,
@@ -209,6 +213,7 @@ impl SharedGraphics {
         let backends = wgpu::Backends::from(gpu.adapter().get_info().backend);
         Self(Rc::new(Shared {
             instances: adapter::Instances::existing(gpu.instance().clone(), backends),
+            compositor_gpu_hint: RefCell::new(None),
             backends,
             extensions: gpu.vulkan_extensions().to_vec(),
             adopted: true,
@@ -279,6 +284,7 @@ impl SharedGraphics {
                     let gpu = Arc::new(gpu);
                     return Ok(Self(Rc::new(Shared {
                         instances: adapter::Instances::existing(gpu.instance().clone(), tier),
+                        compositor_gpu_hint: RefCell::new(None),
                         backends: tier,
                         extensions: Vec::new(),
                         adopted: true,
@@ -380,6 +386,25 @@ impl SharedGraphics {
         pacing: PresentPacing,
         pre_present: Option<PrePresent>,
     ) -> Result<WgpuRenderer, GpuUnavailable> {
+        self.renderer_for_surface_with_hint(target, window, pacing, pre_present, None)
+    }
+
+    /// Like [`SharedGraphics::renderer_for_surface`], carrying an optional compositor GPU
+    /// identity hint for gated direct Vulkan initialization on Linux hybrid-GPU systems.
+    pub fn renderer_for_surface_with_hint(
+        &self,
+        target: RenderTarget,
+        window: impl Into<wgpu::SurfaceTarget<'static>> + Clone,
+        pacing: PresentPacing,
+        pre_present: Option<PrePresent>,
+        compositor_gpu_hint: Option<CompositorGpuHint>,
+    ) -> Result<WgpuRenderer, GpuUnavailable> {
+        if !self.0.adopted
+            && let Some(hint) = compositor_gpu_hint
+        {
+            *self.0.compositor_gpu_hint.borrow_mut() = Some(hint);
+        }
+
         let setup = SurfaceSetup {
             size: extent(target),
             opaque: target.opaque,
@@ -408,7 +433,17 @@ impl SharedGraphics {
             }
         }
 
-        // The first surface: no device has been opened yet, so this is what chooses one.
+        // First surface: try the gated direct Vulkan instance before standard backend tiers.
+        if !self.0.adopted
+            && let Some(hint) = *self.0.compositor_gpu_hint.borrow()
+            && let Some((state, presentation)) =
+                self.try_open_direct(hint, WindowSurface::new(window.clone(), setup))
+        {
+            *self.0.primary.borrow_mut() = Some(Rc::clone(&state));
+            return Ok(self.assemble(state, presentation, target, pre_present, Origin::Surface));
+        }
+
+        // Fallback / non-hybrid path: enumerate standard backend tiers untouched.
         let (state, presentation) = self.open_one(WindowSurface::new(window, setup))?;
         *self.0.primary.borrow_mut() = Some(Rc::clone(&state));
         Ok(self.assemble(state, presentation, target, pre_present, Origin::Surface))
@@ -551,18 +586,73 @@ impl SharedGraphics {
     /// Recovery has nothing else to use, the window's own surface having died with the device, and
     /// neither has a caller that has yet to create anything.
     fn open_primary(&self) -> Result<Rc<DeviceState>, GpuUnavailable> {
-        let (state, _) = self.open_one(|gpu: &Arc<Gpu>| {
+        let offscreen = |gpu: &Arc<Gpu>| {
             Ok(Presentation::Offscreen(Offscreen::new(
                 gpu,
                 Size::new(1, 1),
                 wgpu::TextureFormat::Rgba8UnormSrgb,
                 false,
             )))
-        })?;
+        };
+        if !self.0.adopted
+            && let Some(hint) = *self.0.compositor_gpu_hint.borrow()
+            && let Some((state, _)) = self.try_open_direct(hint, offscreen)
+        {
+            *self.0.primary.borrow_mut() = Some(Rc::clone(&state));
+            return Ok(state);
+        }
+        let (state, _) = self.open_one(offscreen)?;
         // Assigning drops the strong reference to any dead device, so its memory is released as
         // soon as the last renderer has swapped over.
         *self.0.primary.borrow_mut() = Some(Rc::clone(&state));
         Ok(state)
+    }
+
+    /// Stage 1 two-step direct Vulkan probe on a single allowlisted ICD.
+    ///
+    /// Succeeds only when `open_device` creates a device, validates surface/target configuration,
+    /// and confirms any known vendor/device IDs in `hint` match the selected adapter. Any failure
+    /// or mismatch drops the surface, device, and exclusive instance completely before returning
+    /// `None` so standard backend initialization starts from a clean slate.
+    fn try_open_direct(
+        &self,
+        hint: CompositorGpuHint,
+        present: impl Proof,
+    ) -> Option<(Rc<DeviceState>, Presentation)> {
+        let instance =
+            direct_vulkan::try_create_instance(hint, self.0.backends, adapter::instance_flags())?;
+        let direct_instances = adapter::Instances::existing(instance, wgpu::Backends::VULKAN);
+        let opened = open_device(&direct_instances, &self.0.extensions, present);
+        drop(direct_instances);
+
+        let (state, presentation) = match opened {
+            Ok(pair) => pair,
+            Err(unavailable) => {
+                tracing::debug!(
+                    reason = ?unavailable,
+                    "direct exclusive Vulkan stage failed; falling back to standard backend tiers"
+                );
+                return None;
+            }
+        };
+
+        let info = state.gpu.adapter().get_info();
+        let vendor_matches = hint.vendor_id.is_none_or(|vendor| info.vendor == vendor);
+        let device_matches = hint.device_id.is_none_or(|device| info.device == device);
+        if !vendor_matches || !device_matches {
+            tracing::debug!(
+                actual_vendor = format_args!("{:#06x}", info.vendor),
+                actual_device = format_args!("{:#06x}", info.device),
+                expected_vendor = ?hint.vendor_id,
+                expected_device = ?hint.device_id,
+                "direct exclusive Vulkan adapter did not match compositor hint; falling back"
+            );
+            drop(presentation);
+            drop(state);
+            return None;
+        }
+
+        Some((state, presentation))
     }
 
     /// Runs the candidate loop with everything this graphics was constructed to state.

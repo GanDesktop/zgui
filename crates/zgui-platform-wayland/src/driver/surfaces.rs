@@ -270,6 +270,7 @@ impl WaylandState {
             shell: std::sync::Arc::clone(&self.xdg),
             importer: self.extras.importer.clone(),
             wm_dialog: self.extras.wm_dialog.clone(),
+            compositor_gpu_hint: self.compositor_gpu_hint,
             waker: std::sync::Arc::clone(&self.live.waker)
                 as std::sync::Arc<dyn zgui_platform::Waker>,
         }

@@ -2,6 +2,7 @@
 
 mod activation;
 mod data;
+mod dmabuf;
 mod failure;
 mod ime;
 mod input;
@@ -29,7 +30,7 @@ use smithay_client_toolkit::registry::RegistryState;
 use smithay_client_toolkit::seat::SeatState;
 use smithay_client_toolkit::shell::wlr_layer::LayerShell;
 use smithay_client_toolkit::shm::Shm;
-use zgui_platform::{PlatformError, SurfaceEvent, SurfaceId};
+use zgui_platform::{CompositorGpuHint, PlatformError, SurfaceEvent, SurfaceId};
 
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
 
@@ -126,6 +127,8 @@ pub struct WaylandState {
     /// Off for the first round trip: the application reads the outputs when it starts, so the
     /// outputs it starts with are not a change.
     pub(crate) announce_outputs: bool,
+    /// Compositor primary DRM device hint from `zwp_linux_dmabuf_feedback_v1.main_device`.
+    pub(crate) compositor_gpu_hint: Option<CompositorGpuHint>,
 }
 
 impl WaylandState {
@@ -208,6 +211,7 @@ impl WaylandState {
             out: Vec::new(),
             closing: Vec::new(),
             announce_outputs: false,
+            compositor_gpu_hint: None,
             qh: qh.clone(),
         };
         state.clipboard.selections().attach(
@@ -230,6 +234,11 @@ impl WaylandState {
         // capabilities arrive on the first dispatch and open the devices themselves.
         if let Some(seat) = state.seats.seats().next() {
             state.take_seat(&seat);
+        }
+        // Request the default dmabuf feedback before the loop's initial roundtrip so
+        // `main_device` lands with the startup batch without an extra socket roundtrip.
+        if let Some(dmabuf) = state.extras.dmabuf.as_ref() {
+            let _ = dmabuf.get_default_feedback(&state.qh, ());
         }
         Ok(state)
     }

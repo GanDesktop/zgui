@@ -17,3 +17,18 @@ use crate::surface::Surface;
 pub trait GpuSurface: Surface + HasWindowHandle + HasDisplayHandle {}
 
 impl<T> GpuSurface for T where T: Surface + HasWindowHandle + HasDisplayHandle {}
+
+/// Compositor DRM render-device identity reported for a GPU surface.
+///
+/// Carried as an optional hint so the graphics backend can identify which GPU
+/// the compositor itself uses without forcing unrelated GPUs out of runtime
+/// suspension during instance initialization.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct CompositorGpuHint {
+    /// Kernel `dev_t` of the compositor's primary DRM device node, when known.
+    pub drm_render_dev: Option<u64>,
+    /// PCI vendor identifier of the compositor's GPU, when known.
+    pub vendor_id: Option<u32>,
+    /// PCI device identifier of the compositor's GPU, when known.
+    pub device_id: Option<u32>,
+}
