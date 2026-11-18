@@ -101,7 +101,10 @@ style! { pub CarouselStyle =>
     ".zui-carousel__arrow:focus-visible {
         outline: none;
         border-color: var(--zui-color-ring);
-        box-shadow: 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
     ".zui-carousel__arrow:disabled { opacity: 0.5; pointer-events: none; }"
 }

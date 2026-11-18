@@ -65,7 +65,10 @@ style! { pub SettingsStyle =>
     }"
     ".zui-settings__page:focus-visible {
         outline: 1px solid var(--zui-color-sidebar-ring);
-        box-shadow: 0 0 0 3px color-mix(in oklab, var(--zui-color-sidebar-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-sidebar-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-sidebar-ring) 50%, transparent)
+        );
     }"
     ".zui-settings__page[data-disabled=\"true\"] { opacity: 0.5; pointer-events: none; }"
 

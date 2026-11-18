@@ -118,8 +118,8 @@ style! { pub SheetStyle =>
     }"
     ".zui-sheet__dismiss:hover { opacity: 1; }"
     ".zui-sheet__dismiss:focus-visible {
-        outline: 2px solid var(--zui-color-ring);
-        outline-offset: 2px;
+        outline: var(--zui-focus-ring-outline, 2px solid var(--zui-color-ring));
+        outline-offset: var(--zui-focus-ring-offset, 2px);
     }"
     ".zui-sheet__dismiss:disabled { pointer-events: none; }"
 

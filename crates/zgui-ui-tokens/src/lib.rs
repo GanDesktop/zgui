@@ -121,7 +121,7 @@ pub use crate::provider::{
 pub use crate::scheme::ColorScheme;
 pub use crate::theme::{Preset, THEME_SHEET, Theme, ThemeStoreFields, theme_sheet};
 pub use crate::token::{
-    ColorTokens, ControlTokens, Declarations, MotionTokens, RadiusTokens, ScaleTokens,
+    ColorTokens, ControlTokens, Declarations, FocusTokens, MotionTokens, RadiusTokens, ScaleTokens,
     ShadowTokens, SpacingTokens, TypeTokens,
 };
 
@@ -130,7 +130,7 @@ pub use crate::token::{
 /// They are traits, so `theme.color()` does not resolve without the trait in scope — and a
 /// consumer should not have to know that the accessor came from a derive in order to import it.
 pub use crate::token::{
-    ColorTokensStoreFields, ControlTokensStoreFields, MotionTokensStoreFields,
-    RadiusTokensStoreFields, ScaleTokensStoreFields, ShadowTokensStoreFields,
-    SpacingTokensStoreFields, TypeTokensStoreFields,
+    ColorTokensStoreFields, ControlTokensStoreFields, FocusTokensStoreFields,
+    MotionTokensStoreFields, RadiusTokensStoreFields, ScaleTokensStoreFields,
+    ShadowTokensStoreFields, SpacingTokensStoreFields, TypeTokensStoreFields,
 };

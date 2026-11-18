@@ -34,7 +34,10 @@ style! { pub BreadcrumbStyle =>
     ".zui-breadcrumb__link:hover { color: var(--zui-color-foreground); }"
     ".zui-breadcrumb__link:focus-visible {
         outline: none;
-        box-shadow: 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
     // The page you are on is the same weight as the crumbs behind it and only a different colour.
     // Bolding it would make the trail read as a heading with a path in front of it.

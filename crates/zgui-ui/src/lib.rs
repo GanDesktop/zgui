@@ -468,3 +468,32 @@ pub use crate::toggle_group::{
     ToggleGroup, ToggleGroupContext, ToggleGroupItem, ToggleGroupItemProps, ToggleGroupProps,
     ToggleGroupStyle, ToggleSelection,
 };
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        ButtonStyle, CheckboxStyle, DialogStyle, InputGroupStyle, InputStyle, ScrollAreaStyle,
+        SelectStyle, SwitchStyle, TextareaStyle,
+    };
+
+    #[test]
+    fn interactive_sheets_resolve_focus_halos_through_semantic_focus_tokens() {
+        for (name, css) in [
+            ("ButtonStyle", ButtonStyle::CSS),
+            ("InputStyle", InputStyle::CSS),
+            ("TextareaStyle", TextareaStyle::CSS),
+            ("InputGroupStyle", InputGroupStyle::CSS),
+            ("ScrollAreaStyle", ScrollAreaStyle::CSS),
+            ("SelectStyle", SelectStyle::CSS),
+            ("CheckboxStyle", CheckboxStyle::CSS),
+            ("SwitchStyle", SwitchStyle::CSS),
+        ] {
+            assert!(
+                css.contains("--zui-focus-ring-shadow"),
+                "{name} does not resolve its focus ring through --zui-focus-ring-shadow"
+            );
+        }
+        assert!(ScrollAreaStyle::CSS.contains("--zui-focus-ring-inset-shadow"));
+        assert!(DialogStyle::CSS.contains("--zui-focus-ring-outline"));
+    }
+}

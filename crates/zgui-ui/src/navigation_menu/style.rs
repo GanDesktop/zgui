@@ -69,7 +69,10 @@ style! { pub NavigationMenuStyle =>
     ".zui-navigation-menu__trigger:focus-visible,
      .zui-navigation-menu__link:focus-visible {
         outline: 1px solid var(--zui-color-ring);
-        box-shadow: 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
     ".zui-navigation-menu__trigger:disabled { opacity: 0.5; pointer-events: none; }"
 

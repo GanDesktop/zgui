@@ -30,12 +30,18 @@ style! { pub NativeSelectStyle =>
 ":scope[data-size=\"sm\"] { height: 30px; padding-top: 4px; padding-bottom: 4px; }"
 ":scope:focus-visible {
         border-color: var(--zui-color-ring);
-        box-shadow: 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
 ":scope:invalid { border-color: var(--zui-color-destructive); }"
 ":scope:invalid:focus-visible {
         border-color: var(--zui-color-destructive);
-        box-shadow: 0 0 0 3px var(--zui-color-control-ring-invalid);
+        box-shadow: var(
+            --zui-focus-ring-invalid-shadow,
+            0 0 0 3px var(--zui-color-control-ring-invalid)
+        );
     }"
 ":scope:disabled { opacity: 0.5; pointer-events: none; }"
 ".zui-native-select__placeholder { color: var(--zui-color-muted-foreground); }"

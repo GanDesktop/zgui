@@ -14,10 +14,12 @@
 //! | [`RadiusTokens`] | `--zui-radius-` | how round a corner is |
 //! | [`TypeTokens`] | `--zui-type-` | what text is set in |
 //! | [`ShadowTokens`] | `--zui-shadow-` | how far off the page something sits |
+//! | [`FocusTokens`] | `--zui-focus-` | how keyboard focus is framed around a control |
 //! | [`MotionTokens`] | `--zui-motion-` | how long a change takes, and how it is paced |
 
 pub mod color;
 pub mod control;
+pub mod focus;
 mod group;
 pub mod motion;
 pub mod radius;
@@ -29,6 +31,7 @@ mod value;
 
 pub use crate::token::color::{ColorTokens, ColorTokensStoreFields};
 pub use crate::token::control::{ControlTokens, ControlTokensStoreFields};
+pub use crate::token::focus::{FocusTokens, FocusTokensStoreFields};
 pub use crate::token::motion::{MotionTokens, MotionTokensStoreFields};
 pub use crate::token::radius::{RadiusTokens, RadiusTokensStoreFields};
 pub use crate::token::scale::{ScaleTokens, ScaleTokensStoreFields};

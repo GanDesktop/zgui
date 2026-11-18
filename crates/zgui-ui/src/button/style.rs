@@ -130,8 +130,10 @@ style! { pub ButtonStyle =>
         background-color: color-mix(in oklab, var(--zui-color-destructive) 90%, transparent);
     }"
 ":scope[data-variant=\"destructive\"]:focus-visible {
-        --zui-button-ring: 0 0 0 3px
-            var(--zui-color-control-ring-invalid);
+        --zui-button-ring: var(
+            --zui-focus-ring-invalid-shadow,
+            0 0 0 3px var(--zui-color-control-ring-invalid)
+        );
     }"
 
 // An outlined button has no fill and no lift of its own: it takes the tone of the popover, the
@@ -172,12 +174,17 @@ style! { pub ButtonStyle =>
 // read as one halo three pixels deep rather than as an outline standing off a grey edge.
 ":scope:focus-visible {
         border-color: var(--zui-color-ring);
-        --zui-button-ring: 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        --zui-button-ring: var(
+            --zui-focus-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
 ":scope:invalid {
         border-color: var(--zui-color-destructive);
-        --zui-button-ring: 0 0 0 3px
-            var(--zui-color-control-ring-invalid);
+        --zui-button-ring: var(
+            --zui-focus-ring-invalid-shadow,
+            0 0 0 3px var(--zui-color-control-ring-invalid)
+        );
     }"
 ":scope:disabled { opacity: 0.5; pointer-events: none; }"
 

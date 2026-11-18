@@ -35,12 +35,18 @@ style! { pub CheckboxStyle =>
     }"
 ":scope:focus-visible {
         border-color: var(--zui-color-ring);
-        box-shadow: 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
 ":scope:invalid { border-color: var(--zui-color-destructive); }"
 ":scope:invalid:focus-visible {
         border-color: var(--zui-color-destructive);
-        box-shadow: 0 0 0 3px var(--zui-color-control-ring-invalid);
+        box-shadow: var(
+            --zui-focus-ring-invalid-shadow,
+            0 0 0 3px var(--zui-color-control-ring-invalid)
+        );
     }"
 ":scope:disabled { opacity: 0.5; pointer-events: none; }"
 // The mark is drawn always and revealed by state, so ticking one does not build a subtree.

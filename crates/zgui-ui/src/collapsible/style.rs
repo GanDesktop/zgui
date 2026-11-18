@@ -23,7 +23,10 @@ style! { pub CollapsibleStyle =>
     }"
     ".zui-collapsible__trigger:focus-visible {
         outline: none;
-        box-shadow: 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
     ".zui-collapsible__trigger:disabled { opacity: 0.5; pointer-events: none; }"
     // Clipped, no taller than nothing, and animating towards whatever the measurement said. The

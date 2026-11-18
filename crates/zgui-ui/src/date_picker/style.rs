@@ -39,7 +39,10 @@ style! { pub DatePickerStyle =>
     }"
     ":scope .zui-date-picker__trigger:focus-visible {
         border-color: var(--zui-color-ring);
-        box-shadow: 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
     ":scope .zui-date-picker__trigger:disabled {
         opacity: 0.5;

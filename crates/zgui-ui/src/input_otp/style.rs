@@ -57,11 +57,17 @@ style! { pub InputOtpStyle =>
 ":scope:focus .zui-otp__slot[data-active] {
         z-index: 1;
         border-color: var(--zui-color-ring);
-        box-shadow: 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
 ":scope:invalid .zui-otp__slot { border-color: var(--zui-color-destructive); }"
 ":scope:invalid:focus .zui-otp__slot[data-active] {
-        box-shadow: 0 0 0 3px var(--zui-color-control-ring-invalid);
+        box-shadow: var(
+            --zui-focus-ring-invalid-shadow,
+            0 0 0 3px var(--zui-color-control-ring-invalid)
+        );
     }"
 // A caret this component draws, unlike every other field here: there is no editing model behind
 // these boxes to draw one from, because the value is held whole and typed at from a key

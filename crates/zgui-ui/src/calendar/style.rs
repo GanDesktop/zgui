@@ -77,7 +77,10 @@ style! { pub CalendarStyle =>
         color: var(--zui-color-accent-foreground);
     }"
     ":scope .zui-calendar__step:focus-visible {
-        box-shadow: 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
     ":scope .zui-calendar__step[data-disabled=\"true\"] { opacity: 0.5; }"
     // The grid's tracks are the seven days, and there is no gap between the columns: a range drawn
@@ -166,7 +169,10 @@ style! { pub CalendarStyle =>
     // Lifted while focused, so the ring is drawn over the days on either side instead of under them.
     ":scope .zui-calendar__day:focus-visible { z-index: 10; }"
     ":scope .zui-calendar__day:focus-visible .zui-calendar__day-mark {
-        box-shadow: 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
     ":scope .zui-calendar__day:disabled {
         color: var(--zui-color-muted-foreground);

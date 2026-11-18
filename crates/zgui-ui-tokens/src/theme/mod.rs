@@ -8,7 +8,7 @@ use zgui::reactive::store::reactive_stores;
 use zgui::reactive::{Patch, Store};
 
 use crate::token::{
-    ColorTokens, ControlTokens, MotionTokens, RadiusTokens, ScaleTokens, ShadowTokens,
+    ColorTokens, ControlTokens, FocusTokens, MotionTokens, RadiusTokens, ScaleTokens, ShadowTokens,
     SpacingTokens, TypeTokens,
 };
 
@@ -63,6 +63,8 @@ pub struct Theme {
     pub typography: TypeTokens,
     /// How far off the page something sits.
     pub shadow: ShadowTokens,
+    /// How keyboard focus is framed around a control.
+    pub focus: FocusTokens,
     /// How long a change takes, and how it is paced.
     pub motion: MotionTokens,
 }
@@ -78,6 +80,7 @@ impl Theme {
             radius: RadiusTokens::light(),
             typography: TypeTokens::light(),
             shadow: ShadowTokens::light(),
+            focus: FocusTokens::light(),
             motion: MotionTokens::light(),
         }
     }
@@ -92,6 +95,7 @@ impl Theme {
             radius: RadiusTokens::dark(),
             typography: TypeTokens::dark(),
             shadow: ShadowTokens::dark(),
+            focus: FocusTokens::dark(),
             motion: MotionTokens::dark(),
         }
     }
@@ -109,6 +113,7 @@ impl Theme {
         names.extend_from_slice(RadiusTokens::PROPERTIES);
         names.extend_from_slice(TypeTokens::PROPERTIES);
         names.extend_from_slice(ShadowTokens::PROPERTIES);
+        names.extend_from_slice(FocusTokens::PROPERTIES);
         names.extend_from_slice(MotionTokens::PROPERTIES);
         names
     }
@@ -124,6 +129,7 @@ impl Theme {
             || self.radius.set(property, value)
             || self.typography.set(property, value)
             || self.shadow.set(property, value)
+            || self.focus.set(property, value)
             || self.motion.set(property, value)
     }
 
@@ -180,6 +186,7 @@ impl Theme {
         self.radius.declare(out);
         self.typography.declare(out);
         self.shadow.declare(out);
+        self.focus.declare(out);
         self.motion.declare(out);
     }
 }

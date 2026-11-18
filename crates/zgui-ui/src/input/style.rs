@@ -43,7 +43,10 @@ style! { pub InputStyle =>
     }"
 ":scope:focus-visible {
         border-color: var(--zui-color-ring);
-        box-shadow: 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
 // Wrong shows without focus — the border alone — and gains a ring of its own once focus
 // arrives, in the destructive colour rather than the neutral one. A wrong field wearing the
@@ -51,7 +54,10 @@ style! { pub InputStyle =>
 ":scope:invalid { border-color: var(--zui-color-destructive); }"
 ":scope:invalid:focus-visible {
         border-color: var(--zui-color-destructive);
-        box-shadow: 0 0 0 3px var(--zui-color-control-ring-invalid);
+        box-shadow: var(
+            --zui-focus-ring-invalid-shadow,
+            0 0 0 3px var(--zui-color-control-ring-invalid)
+        );
     }"
 ":scope:disabled { opacity: 0.5; pointer-events: none; }"
 // `:empty` is *this field holds no text*, answered by the document itself: the element's only
@@ -96,12 +102,18 @@ style! { pub TextareaStyle =>
     }"
 ":scope:focus-visible {
         border-color: var(--zui-color-ring);
-        box-shadow: 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
 ":scope:invalid { border-color: var(--zui-color-destructive); }"
 ":scope:invalid:focus-visible {
         border-color: var(--zui-color-destructive);
-        box-shadow: 0 0 0 3px var(--zui-color-control-ring-invalid);
+        box-shadow: var(
+            --zui-focus-ring-invalid-shadow,
+            0 0 0 3px var(--zui-color-control-ring-invalid)
+        );
     }"
 ":scope:disabled { opacity: 0.5; pointer-events: none; }"
 ":scope:empty::before {

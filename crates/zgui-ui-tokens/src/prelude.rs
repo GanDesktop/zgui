@@ -14,16 +14,16 @@ pub use crate::provider::{ThemeContext, ThemeProvider, ThemeProviderProps, Theme
 pub use crate::scheme::ColorScheme;
 pub use crate::theme::{Preset, THEME_SHEET, Theme, theme_sheet};
 pub use crate::token::{
-    ColorTokens, Declarations, MotionTokens, RadiusTokens, ScaleTokens, ShadowTokens,
-    SpacingTokens, TypeTokens,
+    ColorTokens, ControlTokens, Declarations, FocusTokens, MotionTokens, RadiusTokens, ScaleTokens,
+    ShadowTokens, SpacingTokens, TypeTokens,
 };
 
 /// The accessors the token stores derive, so that reading one group subscribes to that group
 /// alone.
 pub use crate::token::{
-    ColorTokensStoreFields, MotionTokensStoreFields, RadiusTokensStoreFields,
-    ScaleTokensStoreFields, ShadowTokensStoreFields, SpacingTokensStoreFields,
-    TypeTokensStoreFields,
+    ColorTokensStoreFields, ControlTokensStoreFields, FocusTokensStoreFields,
+    MotionTokensStoreFields, RadiusTokensStoreFields, ScaleTokensStoreFields,
+    ShadowTokensStoreFields, SpacingTokensStoreFields, TypeTokensStoreFields,
 };
 
 /// The same, for a whole theme and for the pair of sets a provider carries.

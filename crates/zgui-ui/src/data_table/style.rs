@@ -87,7 +87,10 @@ style! { pub DataTableStyle =>
         color: var(--zui-color-accent-foreground);
     }"
     ":scope .zui-data-table__sort:focus-visible {
-        box-shadow: 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
     ":scope .zui-data-table__arrow { color: var(--zui-color-muted-foreground); flex: none; }"
     ":scope .zui-data-table__grip {
@@ -141,7 +144,10 @@ style! { pub DataTableStyle =>
     }"
     ":scope .zui-data-table__step:focus-visible {
         border-color: var(--zui-color-ring);
-        box-shadow: 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
     ":scope .zui-data-table__step[data-disabled=\"true\"] {
         opacity: 0.5;

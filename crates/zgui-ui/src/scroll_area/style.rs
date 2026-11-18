@@ -16,7 +16,10 @@ style! { pub ScrollAreaStyle =>
     }"
     ".zui-scroll-area__viewport:focus-visible {
         outline: 1px solid var(--zui-color-ring);
-        box-shadow: 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-ring-shadow,
+            0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
     // Nothing here draws a track or a thumb. Both are composed by the engine into the gutter the
     // viewport reserved, directly beneath this element — so the bar takes no pointer events, since
@@ -48,6 +51,9 @@ style! { pub ScrollAreaStyle =>
     ".zui-scroll-area__bar:focus-visible {
         outline: 1px solid var(--zui-color-ring);
         outline-offset: -1px;
-        box-shadow: inset 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent);
+        box-shadow: var(
+            --zui-focus-ring-inset-shadow,
+            inset 0 0 0 3px color-mix(in oklab, var(--zui-color-ring) 50%, transparent)
+        );
     }"
 }
