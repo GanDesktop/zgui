@@ -1538,6 +1538,9 @@ impl AppHandler for Runtime {
             WakeReason::ClipboardRead { serial, result } => {
                 self.clipboards.resolve(serial, result);
             }
+            WakeReason::ClipboardMimeRead { serial, result } => {
+                self.clipboards.resolve_mime(serial, result);
+            }
             WakeReason::App(event) => self.app_event(cx, event),
             // The effects that read the list run in the next frame's flush, or here when no window
             // is open. One that opens or closes a window queues it like any other caller.

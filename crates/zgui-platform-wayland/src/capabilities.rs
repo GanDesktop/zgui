@@ -27,11 +27,16 @@ pub fn of(offered: Offered) -> PlatformCapabilities {
     // offers itself and then never starts anything is worse than one that does not offer itself.
     capabilities.drag_source = false;
     capabilities.clipboard_formats = if offered.clipboard {
-        vec![ClipboardFormat::Text]
+        vec![
+            ClipboardFormat::Text,
+            ClipboardFormat::FileList,
+            ClipboardFormat::Image,
+        ]
     } else {
         Vec::new()
     };
     capabilities.clipboard_primary_selection = offered.clipboard && offered.primary_selection;
+    capabilities.clipboard_mime = offered.clipboard;
     capabilities.ime = offered.text_input;
     capabilities.ime_purpose_hints = offered.text_input;
     // A Wayland window is never told where it has been placed and can never place itself. Every
@@ -121,11 +126,15 @@ mod tests {
         // Every desktop has the protocol; what a component needs to know is whether anything
         // answers it. A paste command that offers itself and always fails is worse than none.
         assert!(!of(Offered::default()).supports_clipboard_format(ClipboardFormat::Text));
+        assert!(!of(Offered::default()).clipboard_mime);
         let wired = of(Offered {
             clipboard: true,
             ..Offered::default()
         });
         assert!(wired.supports_clipboard_format(ClipboardFormat::Text));
+        assert!(wired.supports_clipboard_format(ClipboardFormat::FileList));
+        assert!(wired.supports_clipboard_format(ClipboardFormat::Image));
+        assert!(wired.clipboard_mime);
     }
 
     #[test]

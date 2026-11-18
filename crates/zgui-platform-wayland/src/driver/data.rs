@@ -109,9 +109,9 @@ impl DataDeviceHandler for WaylandState {
     }
 
     fn selection(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _device: &WlDataDevice) {
-        // Nothing to do: what is on the clipboard is read when somebody asks, not when it changes,
-        // and reading every selection as it appears would ask every application that copies
-        // anything for its content whether or not this one ever pastes.
+        self.clipboard
+            .selections()
+            .selection_changed(zgui_platform::ClipboardKind::Standard);
     }
 }
 
@@ -143,12 +143,12 @@ impl DataSourceHandler for WaylandState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         source: &WlDataSource,
-        _mime: String,
+        mime: String,
         destination: WritePipe,
     ) {
-        // Every media type this application offers carries the same bytes, so which one was asked
-        // for changes nothing: they are five names for one encoding.
-        self.clipboard.selections().serve(source, destination);
+        self.clipboard
+            .selections()
+            .serve(source, &mime, destination);
     }
 
     fn cancelled(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, source: &WlDataSource) {
@@ -194,7 +194,9 @@ impl PrimarySelectionDeviceHandler for WaylandState {
         _qh: &QueueHandle<Self>,
         _device: &ZwpPrimarySelectionDeviceV1,
     ) {
-        // As above: read when asked, not when it changes.
+        self.clipboard
+            .selections()
+            .selection_changed(zgui_platform::ClipboardKind::Primary);
     }
 }
 
@@ -204,12 +206,12 @@ impl PrimarySelectionSourceHandler for WaylandState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         source: &ZwpPrimarySelectionSourceV1,
-        _mime: String,
+        mime: String,
         destination: WritePipe,
     ) {
         self.clipboard
             .selections()
-            .serve_primary(source, destination);
+            .serve_primary(source, &mime, destination);
     }
 
     fn cancelled(

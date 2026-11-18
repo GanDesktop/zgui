@@ -372,14 +372,24 @@ fn capabilities(event_loop: &ActiveEventLoop, knows_scheme: bool) -> PlatformCap
     capabilities
         .drop_mime_types
         .push("text/uri-list".to_owned());
-    capabilities.clipboard_formats = vec![ClipboardFormat::Text];
-    capabilities.clipboard_primary_selection = cfg!(any(
+    let unix_clipboard = cfg!(any(
         target_os = "linux",
         target_os = "dragonfly",
         target_os = "freebsd",
         target_os = "netbsd",
         target_os = "openbsd"
     ));
+    capabilities.clipboard_formats = if unix_clipboard {
+        vec![
+            ClipboardFormat::Text,
+            ClipboardFormat::FileList,
+            ClipboardFormat::Image,
+        ]
+    } else {
+        vec![ClipboardFormat::Text]
+    };
+    capabilities.clipboard_primary_selection = unix_clipboard;
+    capabilities.clipboard_mime = unix_clipboard;
     capabilities.ime = true;
     capabilities.ime_purpose_hints = true;
     // A compositor that forbids a window from placing itself also forbids a pop-up placed in

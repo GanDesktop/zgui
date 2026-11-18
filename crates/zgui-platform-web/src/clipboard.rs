@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use wasm_bindgen_futures::JsFuture;
 use zgui_platform::{
-    Clipboard, ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardSerial,
-    ClipboardSerials, ClipboardWriteOptions, WakeReason, Waker,
+    Clipboard, ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardMime,
+    ClipboardMimeOffer, ClipboardSerial, ClipboardSerials, ClipboardWriteOptions, WakeReason,
+    Waker,
 };
 
 /// The clipboard of one page, for plain text.
@@ -102,6 +103,47 @@ impl Clipboard for PageClipboard {
             }
         });
         Ok(())
+    }
+
+    fn read_mime(
+        &self,
+        kind: ClipboardKind,
+        _mime_types: &[String],
+        _max_bytes: usize,
+    ) -> ClipboardSerial {
+        let serial = self.serials.take();
+        let result = if kind != ClipboardKind::Standard {
+            Err(ClipboardError::UnsupportedKind(kind))
+        } else {
+            Err(ClipboardError::UnsupportedFormat(ClipboardFormat::Text))
+        };
+        self.waker
+            .wake(WakeReason::ClipboardMimeRead { serial, result });
+        serial
+    }
+
+    fn read_mime_blocking(
+        &self,
+        kind: ClipboardKind,
+        _mime_types: &[String],
+        _max_bytes: usize,
+    ) -> Result<ClipboardMimeOffer, ClipboardError> {
+        if kind != ClipboardKind::Standard {
+            return Err(ClipboardError::UnsupportedKind(kind));
+        }
+        Err(ClipboardError::UnsupportedFormat(ClipboardFormat::Text))
+    }
+
+    fn write_mime(
+        &self,
+        kind: ClipboardKind,
+        _entries: &[ClipboardMime],
+        _expected_revision: Option<u64>,
+    ) -> Result<(), ClipboardError> {
+        if kind != ClipboardKind::Standard {
+            return Err(ClipboardError::UnsupportedKind(kind));
+        }
+        Err(ClipboardError::UnsupportedFormat(ClipboardFormat::Text))
     }
 
     fn clear(&self, kind: ClipboardKind) -> Result<(), ClipboardError> {

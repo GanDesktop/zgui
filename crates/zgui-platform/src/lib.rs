@@ -83,8 +83,8 @@ mod backends;
 pub use crate::app::{AppEvent, AppHandler, IdlePolicy, Install, Park, Parked, WakeReason};
 pub use crate::capabilities::PlatformCapabilities;
 pub use crate::clipboard::{
-    Clipboard, ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardSerial,
-    ClipboardSerials, ClipboardWriteOptions,
+    Clipboard, ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardMime,
+    ClipboardMimeOffer, ClipboardSerial, ClipboardSerials, ClipboardWriteOptions,
 };
 pub use crate::clock::{Clock, VirtualClock};
 pub use crate::cx::PlatformCx;

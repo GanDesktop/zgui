@@ -38,7 +38,15 @@ pub const LIMIT: usize = 32 * 1024 * 1024;
 ///
 /// Answers with what arrived before the deadline, or why it did not.
 pub fn read(source: impl Read + AsFd, patience: Duration) -> Result<Vec<u8>, Failed> {
-    let deadline = Instant::now() + patience;
+    read_until(source, Instant::now() + patience, LIMIT)
+}
+
+/// Reads everything the other end writes, up to `deadline` and `limit` bytes.
+pub fn read_until(
+    source: impl Read + AsFd,
+    deadline: Instant,
+    limit: usize,
+) -> Result<Vec<u8>, Failed> {
     let mut source = source;
     let mut taken = Vec::new();
     let mut chunk = [0_u8; 8192];
@@ -49,7 +57,7 @@ pub fn read(source: impl Read + AsFd, patience: Duration) -> Result<Vec<u8>, Fai
         match source.read(&mut chunk) {
             Ok(0) => return Ok(taken),
             Ok(read) => {
-                if taken.len() + read > LIMIT {
+                if taken.len().saturating_add(read) > limit {
                     return Err(Failed::TooLarge);
                 }
                 taken.extend_from_slice(&chunk[..read]);

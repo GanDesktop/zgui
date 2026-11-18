@@ -146,9 +146,10 @@ wayland-scanner = "0.31.11"
 # has no winit to wrap it with.
 accesskit_unix = "0.22.1"
 # `default-features = false` drops `wayland-data-control`, so the X11 arm is taken
-# unconditionally and the Wayland clipboard goes through smithay-clipboard instead.
+# unconditionally on non-Unix or non-X11 targets where arboard runs. On Linux and BSDs,
+# `zgui-platform-winit` speaks X11 selections directly via `x11rb` and Wayland data-device directly.
 arboard = { version = "3.6", default-features = false }
-smithay-clipboard = "0.7"
+x11rb = { version = "0.13.2", features = ["xfixes"] }
 # The macOS application menu, the dock's reopen request and the title-bar buttons. All three are
 # AppKit objects winit does not expose, so `zgui-platform-winit` reaches them through objc2 and
 # builds the menu with muda. `default-features = false` keeps gtk out of every other desktop.

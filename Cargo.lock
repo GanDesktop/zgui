@@ -3766,17 +3766,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "smithay-clipboard"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71704c03f739f7745053bde45fa203a46c58d25bc5c4efba1d9a60e9dba81226"
-dependencies = [
- "libc",
- "smithay-client-toolkit 0.20.0",
- "wayland-backend",
-]
-
-[[package]]
 name = "smol_str"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6129,15 +6118,21 @@ dependencies = [
  "accesskit_winit",
  "arboard",
  "block2 0.6.2",
+ "calloop 0.14.4",
+ "calloop-wayland-source 0.4.1",
  "muda",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "raw-window-handle",
- "smithay-clipboard",
+ "rustix 1.1.4",
+ "smithay-client-toolkit 0.20.0",
  "tracing",
+ "wayland-backend",
+ "wayland-client",
  "windows-sys 0.61.2",
  "winit",
+ "x11rb",
  "zgui-elements",
  "zgui-geom",
  "zgui-platform",

@@ -45,6 +45,8 @@ pub struct PlatformCapabilities {
     pub clipboard_formats: Vec<ClipboardFormat>,
     /// Whether the selection clipboard exists.
     pub clipboard_primary_selection: bool,
+    /// Whether arbitrary MIME types and offer-revision compare-and-swap writes are supported.
+    pub clipboard_mime: bool,
     /// Whether an input method is available and its state can be steered.
     pub ime: bool,
     /// Whether the platform accepts a hint about what kind of text a field expects.
@@ -120,6 +122,7 @@ impl PlatformCapabilities {
             drop_mime_types: Vec::new(),
             clipboard_formats: vec![ClipboardFormat::Text],
             clipboard_primary_selection: false,
+            clipboard_mime: false,
             ime: false,
             ime_purpose_hints: false,
             absolute_window_position: false,
@@ -182,6 +185,7 @@ mod tests {
         assert!(!capabilities.system_color_scheme);
         assert_eq!(capabilities.decorations, DecorationSource::Platform);
         assert_eq!(capabilities.clipboard_formats, [ClipboardFormat::Text]);
+        assert!(!capabilities.clipboard_mime);
     }
 
     #[test]

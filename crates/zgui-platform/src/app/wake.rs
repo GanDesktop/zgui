@@ -3,7 +3,7 @@
 use accesskit::ActionRequest;
 
 use crate::app::event::AppEvent;
-use crate::clipboard::{ClipboardData, ClipboardError, ClipboardSerial};
+use crate::clipboard::{ClipboardData, ClipboardError, ClipboardMimeOffer, ClipboardSerial};
 use crate::grab::FocusGrabId;
 use crate::surface::SurfaceId;
 
@@ -42,6 +42,13 @@ pub enum WakeReason {
         serial: ClipboardSerial,
         /// What was on the clipboard, or why it could not be read.
         result: Result<ClipboardData, ClipboardError>,
+    },
+    /// A multi-MIME clipboard read that was started earlier has finished.
+    ClipboardMimeRead {
+        /// The read this answers.
+        serial: ClipboardSerial,
+        /// The matched offer payloads, or why it could not be read.
+        result: Result<ClipboardMimeOffer, ClipboardError>,
     },
     /// The application queued work for its own runtime: a window to open, one to close, or a
     /// request to quit.
@@ -117,6 +124,11 @@ mod tests {
         assert!(WakeReason::MonitorsChanged.surfaces().is_empty());
         // Opening a window names no surface because the surface does not exist yet.
         assert!(WakeReason::AppWork.surfaces().is_empty());
+        let mime_read = WakeReason::ClipboardMimeRead {
+            serial: crate::clipboard::ClipboardSerials::default().take(),
+            result: Err(crate::clipboard::ClipboardError::TimedOut),
+        };
+        assert!(mime_read.surfaces().is_empty());
     }
 
     #[test]

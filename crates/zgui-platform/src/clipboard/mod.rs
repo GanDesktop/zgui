@@ -5,7 +5,8 @@ mod error;
 mod serial;
 
 pub use crate::clipboard::data::{
-    ClipboardData, ClipboardFormat, ClipboardKind, ClipboardWriteOptions,
+    ClipboardData, ClipboardFormat, ClipboardKind, ClipboardMime, ClipboardMimeOffer,
+    ClipboardWriteOptions,
 };
 pub use crate::clipboard::error::ClipboardError;
 pub use crate::clipboard::serial::{ClipboardSerial, ClipboardSerials};
@@ -61,6 +62,34 @@ pub trait Clipboard {
         options: ClipboardWriteOptions,
     ) -> Result<(), ClipboardError>;
 
+    /// Starts a multi-MIME read from a single clipboard offer; the answer arrives as a wake
+    /// carrying the returned identifier.
+    fn read_mime(
+        &self,
+        kind: ClipboardKind,
+        mime_types: &[String],
+        max_bytes: usize,
+    ) -> ClipboardSerial;
+
+    /// Blocks until one offer's matching MIME payloads arrive.
+    fn read_mime_blocking(
+        &self,
+        kind: ClipboardKind,
+        mime_types: &[String],
+        max_bytes: usize,
+    ) -> Result<ClipboardMimeOffer, ClipboardError>;
+
+    /// Atomically replaces all offered MIME types on `kind`, checking `expected_revision` when
+    /// provided.
+    ///
+    /// An empty slice clears the clipboard.
+    fn write_mime(
+        &self,
+        kind: ClipboardKind,
+        entries: &[ClipboardMime],
+        expected_revision: Option<u64>,
+    ) -> Result<(), ClipboardError>;
+
     /// Empties the clipboard.
     fn clear(&self, kind: ClipboardKind) -> Result<(), ClipboardError>;
 }
@@ -68,8 +97,8 @@ pub trait Clipboard {
 #[cfg(test)]
 mod tests {
     use super::{
-        Clipboard, ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardSerial,
-        ClipboardSerials, ClipboardWriteOptions,
+        Clipboard, ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardMime,
+        ClipboardMimeOffer, ClipboardSerial, ClipboardSerials, ClipboardWriteOptions,
     };
     use std::sync::Mutex;
 
@@ -114,6 +143,75 @@ mod tests {
             }
             *self.held.lock().expect("the clipboard is not poisoned") = Some(data);
             Ok(())
+        }
+
+        fn read_mime(
+            &self,
+            kind: ClipboardKind,
+            mime_types: &[String],
+            max_bytes: usize,
+        ) -> ClipboardSerial {
+            let _ = (kind, mime_types, max_bytes);
+            self.serials.take()
+        }
+
+        fn read_mime_blocking(
+            &self,
+            kind: ClipboardKind,
+            mime_types: &[String],
+            max_bytes: usize,
+        ) -> Result<ClipboardMimeOffer, ClipboardError> {
+            let data = self.read_blocking(kind, ClipboardFormat::Text)?;
+            let text = data.as_text().unwrap_or_default().as_bytes();
+            let wants_text = mime_types
+                .iter()
+                .find(|mime| matches!(mime.as_str(), "text/plain;charset=utf-8" | "text/plain"));
+            let Some(mime) = wants_text else {
+                return Ok(ClipboardMimeOffer {
+                    revision: 1,
+                    entries: Vec::new(),
+                });
+            };
+            if text.len() > max_bytes {
+                return Err(ClipboardError::Backend(format!(
+                    "clipboard payload exceeds {max_bytes} bytes"
+                )));
+            }
+            Ok(ClipboardMimeOffer {
+                revision: 1,
+                entries: vec![ClipboardMime::new(mime.clone(), text.to_vec())],
+            })
+        }
+
+        fn write_mime(
+            &self,
+            kind: ClipboardKind,
+            entries: &[ClipboardMime],
+            expected_revision: Option<u64>,
+        ) -> Result<(), ClipboardError> {
+            if expected_revision.is_some_and(|revision| revision != 1) {
+                return Err(ClipboardError::Changed(kind));
+            }
+            if entries.is_empty() {
+                return self.clear(kind);
+            }
+            let Some(text) = entries
+                .iter()
+                .find(|entry| {
+                    matches!(
+                        entry.mime_type.as_str(),
+                        "text/plain;charset=utf-8" | "text/plain"
+                    )
+                })
+                .and_then(|entry| std::str::from_utf8(&entry.bytes).ok())
+            else {
+                return Err(ClipboardError::UnsupportedFormat(ClipboardFormat::Text));
+            };
+            self.write(
+                kind,
+                ClipboardData::from(text),
+                ClipboardWriteOptions::default(),
+            )
         }
 
         fn clear(&self, kind: ClipboardKind) -> Result<(), ClipboardError> {

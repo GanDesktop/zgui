@@ -11,13 +11,16 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::task::{Context, Poll, Waker as TaskWaker};
 
 use rustc_hash::FxHashMap;
 use zgui_platform::{
-    ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardSerial,
-    ClipboardWriteOptions, PlatformCx, WakeReason, Waker,
+    ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardMime,
+    ClipboardMimeOffer, ClipboardSerial, ClipboardWriteOptions, PlatformCx, WakeReason, Waker,
 };
 use zgui_reactive::prelude::*;
 use zgui_reactive::{LocalStorage, RwSignal, Signal};
@@ -25,6 +28,48 @@ use zgui_vocab::SharedString;
 
 /// What a started read calls when its answer arrives.
 type ReadCallback = Box<dyn FnOnce(Option<String>)>;
+/// What a started multi-MIME read calls when its answer arrives.
+type ReadMimeCallback = Box<dyn FnOnce(Result<Option<ClipboardMimeOffer>, ClipboardError>)>;
+/// What a queued multi-MIME write calls after running.
+type WriteMimeCallback = Box<dyn FnOnce(Result<(), ClipboardError>)>;
+
+struct OpSlot<T> {
+    ready: Option<T>,
+    waker: Option<TaskWaker>,
+}
+
+impl<T> OpSlot<T> {
+    fn new_shared() -> Rc<RefCell<Self>> {
+        Rc::new(RefCell::new(Self {
+            ready: None,
+            waker: None,
+        }))
+    }
+
+    fn complete(slot: &Rc<RefCell<Self>>, value: T) {
+        let mut inner = slot.borrow_mut();
+        inner.ready = Some(value);
+        if let Some(waker) = inner.waker.take() {
+            waker.wake();
+        }
+    }
+}
+
+struct OpFuture<T>(Rc<RefCell<OpSlot<T>>>);
+
+impl<T> Future for OpFuture<T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut inner = self.0.borrow_mut();
+        if let Some(value) = inner.ready.take() {
+            Poll::Ready(value)
+        } else {
+            inner.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
 
 /// One thing asked of a clipboard.
 enum ClipboardRequest {
@@ -37,6 +82,17 @@ enum ClipboardRequest {
         /// How it goes on.
         options: ClipboardWriteOptions,
     },
+    /// Replace `kind` with `entries`, validating `expected_revision`.
+    WriteMime {
+        /// Which clipboard.
+        kind: ClipboardKind,
+        /// Entries to offer on the clipboard (empty clears it).
+        entries: Vec<ClipboardMime>,
+        /// Optional compare-and-swap revision.
+        expected_revision: Option<u64>,
+        /// Continuation notified with the write outcome.
+        then: WriteMimeCallback,
+    },
     /// Empty that clipboard.
     Clear {
         /// Which clipboard.
@@ -48,6 +104,17 @@ enum ClipboardRequest {
         kind: ClipboardKind,
         /// What to call with the answer.
         then: ReadCallback,
+    },
+    /// Read matching MIME payloads from a single clipboard offer.
+    ReadMime {
+        /// Which clipboard.
+        kind: ClipboardKind,
+        /// Requested MIME names in priority order.
+        mime_types: Vec<String>,
+        /// Cumulative payload byte cap.
+        max_bytes: usize,
+        /// Continuation notified with the matched offer.
+        then: ReadMimeCallback,
     },
 }
 
@@ -89,6 +156,8 @@ struct Inner {
     queue: VecDeque<ClipboardRequest>,
     /// Reads that have been started and not yet answered.
     pending: FxHashMap<ClipboardSerial, ReadCallback>,
+    /// Multi-MIME reads that have been started and not yet answered.
+    pending_mime: FxHashMap<ClipboardSerial, ReadMimeCallback>,
     /// How to wake the loop, once there is a loop to wake.
     platform: Option<Arc<dyn Waker>>,
 }
@@ -165,6 +234,47 @@ impl Clipboards {
         self.push(ClipboardRequest::Clear { kind });
     }
 
+    /// Reads requested `mime_types` atomically from the current offer on `kind`.
+    ///
+    /// Resolves to `Ok(None)` when `kind` has no active selection offer.
+    pub fn read_mime(
+        &self,
+        kind: ClipboardKind,
+        mime_types: Vec<String>,
+        max_bytes: usize,
+    ) -> impl Future<Output = Result<Option<ClipboardMimeOffer>, ClipboardError>> + 'static {
+        let slot = OpSlot::new_shared();
+        let complete_slot = Rc::clone(&slot);
+        self.push(ClipboardRequest::ReadMime {
+            kind,
+            mime_types,
+            max_bytes,
+            then: Box::new(move |result| OpSlot::complete(&complete_slot, result)),
+        });
+        OpFuture(slot)
+    }
+
+    /// Atomically replaces all offered MIME types on `kind`, checking `expected_revision` when
+    /// provided.
+    ///
+    /// An empty `entries` vector clears the clipboard.
+    pub fn write_mime(
+        &self,
+        kind: ClipboardKind,
+        entries: Vec<ClipboardMime>,
+        expected_revision: Option<u64>,
+    ) -> impl Future<Output = Result<(), ClipboardError>> + 'static {
+        let slot = OpSlot::new_shared();
+        let complete_slot = Rc::clone(&slot);
+        self.push(ClipboardRequest::WriteMime {
+            kind,
+            entries,
+            expected_revision,
+            then: Box::new(move |result| OpSlot::complete(&complete_slot, result)),
+        });
+        OpFuture(slot)
+    }
+
     /// Queues one request and wakes the loop.
     fn push(&self, request: ClipboardRequest) {
         self.inner.borrow_mut().queue.push_back(request);
@@ -209,6 +319,15 @@ impl Clipboards {
                         tracing::debug!(?kind, ?error, "this desktop did not empty the clipboard");
                     }
                 }
+                ClipboardRequest::WriteMime {
+                    kind,
+                    entries,
+                    expected_revision,
+                    then,
+                } => {
+                    let result = cx.clipboard().write_mime(kind, &entries, expected_revision);
+                    then(result);
+                }
                 ClipboardRequest::Read { kind, then } => {
                     let serial = cx.clipboard().read(kind, ClipboardFormat::Text);
                     // Recorded after the read rather than before, because the read is what names
@@ -216,6 +335,15 @@ impl Clipboards {
                     // holds the runtime exclusively while it runs: the answer cannot be routed
                     // before this call returns.
                     self.inner.borrow_mut().pending.insert(serial, then);
+                }
+                ClipboardRequest::ReadMime {
+                    kind,
+                    mime_types,
+                    max_bytes,
+                    then,
+                } => {
+                    let serial = cx.clipboard().read_mime(kind, &mime_types, max_bytes);
+                    self.inner.borrow_mut().pending_mime.insert(serial, then);
                 }
             }
         }
@@ -240,6 +368,27 @@ impl Clipboards {
                 .ok()
                 .and_then(|data| data.as_text().map(str::to_owned)),
         );
+    }
+
+    /// Answers the multi-MIME read `serial` named.
+    pub(crate) fn resolve_mime(
+        &self,
+        serial: ClipboardSerial,
+        result: Result<ClipboardMimeOffer, ClipboardError>,
+    ) {
+        let Some(then) = self.inner.borrow_mut().pending_mime.remove(&serial) else {
+            tracing::debug!(
+                ?serial,
+                "an answer arrived for a multi-MIME read nothing was waiting on"
+            );
+            return;
+        };
+        let mapped = match result {
+            Ok(offer) => Ok(Some(offer)),
+            Err(ClipboardError::Empty(_)) => Ok(None),
+            Err(error) => Err(error),
+        };
+        then(mapped);
     }
 
     /// Wakes the loop, so that what was queued is carried out.
@@ -349,5 +498,68 @@ mod tests {
 
         assert!(*dropped.borrow(), "the callback was dropped");
         assert!(!*called.borrow(), "and no answer was made up for it");
+    }
+
+    #[test]
+    fn mime_read_maps_empty_to_none_and_delivers_offer() {
+        use std::pin::pin;
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Wake, Waker};
+        use zgui_platform::{ClipboardMime, ClipboardMimeOffer};
+
+        struct NoopWake;
+        impl Wake for NoopWake {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let waker: Waker = Arc::new(NoopWake).into();
+        let mut cx = Context::from_waker(&waker);
+        let clipboards = Clipboards::new();
+
+        let fut_empty =
+            clipboards.read_mime(ClipboardKind::Standard, vec!["text/uri-list".into()], 64);
+        let mut pinned_empty = pin!(fut_empty);
+        assert!(matches!(pinned_empty.as_mut().poll(&mut cx), Poll::Pending));
+        let req_empty = clipboards
+            .inner
+            .borrow_mut()
+            .queue
+            .pop_front()
+            .expect("queued");
+        if let super::ClipboardRequest::ReadMime { then, .. } = req_empty {
+            clipboards
+                .inner
+                .borrow_mut()
+                .pending_mime
+                .insert(ClipboardSerial::new(10), then);
+        }
+        clipboards.resolve_mime(
+            ClipboardSerial::new(10),
+            Err(ClipboardError::Empty(ClipboardKind::Standard)),
+        );
+        assert_eq!(pinned_empty.poll(&mut cx), Poll::Ready(Ok(None)));
+
+        let fut_offer =
+            clipboards.read_mime(ClipboardKind::Standard, vec!["text/uri-list".into()], 64);
+        let pinned_offer = pin!(fut_offer);
+        let req_offer = clipboards
+            .inner
+            .borrow_mut()
+            .queue
+            .pop_front()
+            .expect("queued");
+        if let super::ClipboardRequest::ReadMime { then, .. } = req_offer {
+            clipboards
+                .inner
+                .borrow_mut()
+                .pending_mime
+                .insert(ClipboardSerial::new(11), then);
+        }
+        let offer = ClipboardMimeOffer {
+            revision: 4,
+            entries: vec![ClipboardMime::new("text/uri-list", b"file:///tmp/a\r\n")],
+        };
+        clipboards.resolve_mime(ClipboardSerial::new(11), Ok(offer.clone()));
+        assert_eq!(pinned_offer.poll(&mut cx), Poll::Ready(Ok(Some(offer))));
     }
 }

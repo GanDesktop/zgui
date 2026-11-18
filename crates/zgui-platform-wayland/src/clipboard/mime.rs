@@ -53,14 +53,119 @@ pub fn has_files(offered: &[String]) -> bool {
     offered.iter().any(|has| has.eq_ignore_ascii_case(URI_LIST))
 }
 
-/// Whether this backend can answer a request for `format` at all.
-///
-/// Only plain text crosses this boundary, which is what the contract promises and no more. Markup,
-/// images and file lists on the *clipboard* are refused with a reason a caller can fall back from,
-/// rather than answered with an empty value it cannot tell from an empty clipboard. Files being
-/// dragged are a different path and do arrive.
+/// The preferred image media type from `offered`, if any.
+pub fn best_image(offered: &[String]) -> Option<String> {
+    const PREFERRED: [&str; 5] = [
+        "image/png",
+        "image/webp",
+        "image/jpeg",
+        "image/bmp",
+        "image/gif",
+    ];
+    PREFERRED
+        .iter()
+        .find_map(|wanted| {
+            offered
+                .iter()
+                .find(|has| has.eq_ignore_ascii_case(wanted))
+                .cloned()
+        })
+        .or_else(|| {
+            offered
+                .iter()
+                .find(|has| has.to_ascii_lowercase().starts_with("image/"))
+                .cloned()
+        })
+}
+
+/// Returns the matching MIME name as offered by the peer, preserving exact case first.
+pub fn match_offered<'a>(offered: &'a [String], wanted: &str) -> Option<&'a str> {
+    offered
+        .iter()
+        .find(|has| has.as_str() == wanted)
+        .or_else(|| offered.iter().find(|has| has.eq_ignore_ascii_case(wanted)))
+        .map(String::as_str)
+}
+
+/// Encodes `paths` as a RFC 2483 `text/uri-list` payload.
+pub fn encode_uri_list(paths: &[std::path::PathBuf]) -> Vec<u8> {
+    let mut out = String::new();
+    for path in paths {
+        out.push_str("file://");
+        for byte in path.as_os_str().as_encoded_bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                    out.push(*byte as char)
+                }
+                _ => out.push_str(&format!("%{byte:02X}")),
+            }
+        }
+        out.push_str("\r\n");
+    }
+    out.into_bytes()
+}
+
+/// Decodes a `text/uri-list` payload into local filesystem paths.
+pub fn decode_uri_list(bytes: &[u8]) -> Vec<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let text = String::from_utf8_lossy(bytes);
+    let mut paths = Vec::new();
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = line
+            .strip_prefix("file://localhost")
+            .or_else(|| line.strip_prefix("file://"))
+        else {
+            continue;
+        };
+        if !rest.starts_with('/') {
+            continue;
+        }
+        let decoded = percent_decode(rest.as_bytes());
+        paths.push(std::path::PathBuf::from(std::ffi::OsString::from_vec(
+            decoded,
+        )));
+    }
+    paths
+}
+
+fn percent_decode(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        if input[i] == b'%'
+            && i + 2 < input.len()
+            && let (Some(hi), Some(lo)) = (hex_value(input[i + 1]), hex_value(input[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
+        }
+        out.push(input[i]);
+        i += 1;
+    }
+    out
+}
+
+const fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Whether this backend can answer a single-format request for `format`.
 pub const fn is_supported(format: ClipboardFormat) -> bool {
-    matches!(format, ClipboardFormat::Text)
+    matches!(
+        format,
+        ClipboardFormat::Text | ClipboardFormat::FileList | ClipboardFormat::Image
+    )
 }
 
 #[cfg(test)]
@@ -114,10 +219,22 @@ mod tests {
     }
 
     #[test]
-    fn only_plain_text_crosses_the_clipboard_boundary() {
+    fn supported_single_formats_include_text_files_and_images() {
         assert!(is_supported(ClipboardFormat::Text));
+        assert!(is_supported(ClipboardFormat::Image));
+        assert!(is_supported(ClipboardFormat::FileList));
         assert!(!is_supported(ClipboardFormat::Html));
-        assert!(!is_supported(ClipboardFormat::Image));
-        assert!(!is_supported(ClipboardFormat::FileList));
+    }
+
+    #[test]
+    fn uri_list_round_trips_paths_with_spaces() {
+        use std::path::PathBuf;
+
+        let paths = vec![
+            PathBuf::from("/tmp/hello world.png"),
+            PathBuf::from("/home/user/100%.txt"),
+        ];
+        let encoded = super::encode_uri_list(&paths);
+        assert_eq!(super::decode_uri_list(&encoded), paths);
     }
 }

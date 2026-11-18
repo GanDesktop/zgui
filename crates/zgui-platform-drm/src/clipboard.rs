@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use zgui_platform::{
-    Clipboard, ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardSerial,
-    ClipboardSerials, ClipboardWriteOptions, WakeReason, Waker,
+    Clipboard, ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardMime,
+    ClipboardMimeOffer, ClipboardSerial, ClipboardSerials, ClipboardWriteOptions, WakeReason,
+    Waker,
 };
 
 /// The clipboard of a bare console, which holds nothing.
@@ -82,6 +83,38 @@ impl Clipboard for ConsoleClipboard {
         kind: ClipboardKind,
         _data: ClipboardData,
         _options: ClipboardWriteOptions,
+    ) -> Result<(), ClipboardError> {
+        Err(ClipboardError::UnsupportedKind(kind))
+    }
+
+    fn read_mime(
+        &self,
+        kind: ClipboardKind,
+        _mime_types: &[String],
+        _max_bytes: usize,
+    ) -> ClipboardSerial {
+        let serial = self.serials.take();
+        self.waker.wake(WakeReason::ClipboardMimeRead {
+            serial,
+            result: Err(ClipboardError::UnsupportedKind(kind)),
+        });
+        serial
+    }
+
+    fn read_mime_blocking(
+        &self,
+        kind: ClipboardKind,
+        _mime_types: &[String],
+        _max_bytes: usize,
+    ) -> Result<ClipboardMimeOffer, ClipboardError> {
+        Err(ClipboardError::UnsupportedKind(kind))
+    }
+
+    fn write_mime(
+        &self,
+        kind: ClipboardKind,
+        _entries: &[ClipboardMime],
+        _expected_revision: Option<u64>,
     ) -> Result<(), ClipboardError> {
         Err(ClipboardError::UnsupportedKind(kind))
     }

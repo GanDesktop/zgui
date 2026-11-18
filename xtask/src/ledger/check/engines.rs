@@ -77,7 +77,7 @@ const LEDGER: &[(&str, &[&str])] = &[
     ("winit", &["zgui-platform-winit"]),
     ("accesskit_winit", &["zgui-platform-winit"]),
     ("arboard", &["zgui-platform-winit"]),
-    ("smithay-clipboard", &["zgui-platform-winit"]),
+    ("x11rb", &["zgui-platform-winit"]),
     ("muda", &["zgui-platform-winit"]),
     ("objc2", &["zgui-platform-winit"]),
     ("block2", &["zgui-platform-winit"]),
@@ -88,14 +88,26 @@ const LEDGER: &[(&str, &[&str])] = &[
     // it is read on, and the whole point of a second platform backend is that none of them is
     // reachable from anywhere else: a crate above the seam that named one would be a crate that
     // stops compiling on macOS.
-    ("smithay-client-toolkit", &["zgui-platform-wayland"]),
-    ("wayland-client", &["zgui-platform-wayland"]),
-    ("wayland-backend", &["zgui-platform-wayland"]),
+    (
+        "smithay-client-toolkit",
+        &["zgui-platform-wayland", "zgui-platform-winit"],
+    ),
+    (
+        "wayland-client",
+        &["zgui-platform-wayland", "zgui-platform-winit"],
+    ),
+    (
+        "wayland-backend",
+        &["zgui-platform-wayland", "zgui-platform-winit"],
+    ),
     ("wayland-protocols", &["zgui-platform-wayland"]),
     ("wayland-protocols-wlr", &["zgui-platform-wayland"]),
     ("wayland-scanner", &["zgui-platform-wayland"]),
-    ("calloop", &["zgui-platform-wayland"]),
-    ("calloop-wayland-source", &["zgui-platform-wayland"]),
+    ("calloop", &["zgui-platform-wayland", "zgui-platform-winit"]),
+    (
+        "calloop-wayland-source",
+        &["zgui-platform-wayland", "zgui-platform-winit"],
+    ),
     ("accesskit_unix", &["zgui-platform-wayland"]),
     // The browser's interfaces, and one crate names them. A page is a platform like a compositor
     // is: its canvas, its events and its callbacks stay behind the platform contract.
@@ -131,6 +143,7 @@ const LEDGER: &[(&str, &[&str])] = &[
             "zgui-platform-drm",
             "zgui-evdev",
             "zgui-platform-wayland",
+            "zgui-platform-winit",
         ],
     ),
     // Both uapi crates read vendored kernel headers at build time. An ioctl request number is

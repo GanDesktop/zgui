@@ -22,7 +22,15 @@
 //! the answer usually *is* available at once, and threading it through the loop for that case is
 //! ceremony.
 
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+)))]
 mod desktop;
+mod mime;
 #[cfg(any(
     target_os = "linux",
     target_os = "dragonfly",
@@ -31,22 +39,54 @@ mod desktop;
     target_os = "openbsd"
 ))]
 mod wayland;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+mod x11;
 
 use std::cell::RefCell;
 use std::sync::Arc;
 
 use raw_window_handle::HasDisplayHandle;
 use zgui_platform::{
-    Clipboard, ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardSerial,
-    ClipboardSerials, ClipboardWriteOptions, WakeReason, Waker,
+    Clipboard, ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardMime,
+    ClipboardMimeOffer, ClipboardSerial, ClipboardSerials, ClipboardWriteOptions, WakeReason,
+    Waker,
 };
 
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+)))]
 use crate::clipboard::desktop::Desktop;
 
 /// Which implementation a running program ended up with.
 enum Backend {
-    /// The desktop-wide library, which is right everywhere except under a Wayland compositor.
+    /// The desktop-wide library on macOS and Windows.
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )))]
     Desktop(Desktop),
+    /// Native X11 selection protocol over `x11rb`.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    X11(Arc<x11::X11>),
     /// The compositor's own data device, over the connection the window system already owns.
     #[cfg(any(
         target_os = "linux",
@@ -55,15 +95,10 @@ enum Backend {
         target_os = "netbsd",
         target_os = "openbsd"
     ))]
-    Wayland(wayland::Wayland),
+    Wayland(Arc<wayland::Wayland>),
 }
 
 /// The desktop's clipboards.
-///
-/// Only plain text crosses this boundary. That is not an omission to be filled in later but what
-/// the contract promises and no more: markup, file lists and images are genuinely absent from some
-/// real desktops, and a request for one of them is refused with a reason a caller can fall back
-/// from rather than answered with an empty value it cannot tell from a genuinely empty clipboard.
 pub struct DesktopClipboard {
     /// Identifiers for reads answered through the loop.
     serials: ClipboardSerials,
@@ -81,13 +116,26 @@ impl Default for DesktopClipboard {
 
 impl DesktopClipboard {
     /// A clipboard that has not yet seen which desktop it is on.
-    ///
-    /// Until the running loop's connection has been seen this is the desktop-wide library, which is the
-    /// right answer everywhere but under a Wayland compositor and is never wrong enough to fail.
     pub fn new() -> Self {
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        let backend = Backend::X11(Arc::new(x11::X11::default()));
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        )))]
+        let backend = Backend::Desktop(Desktop::default());
         Self {
             serials: ClipboardSerials::new(),
-            backend: RefCell::new(Backend::Desktop(Desktop::default())),
+            backend: RefCell::new(backend),
             waker: RefCell::new(None),
         }
     }
@@ -120,7 +168,7 @@ impl DesktopClipboard {
             // event loop owns that connection for as long as the program runs. This clipboard is
             // stored beside the loop and dropped with it, so the connection outlives it.
             let clipboard = unsafe { wayland::Wayland::new(wayland.display.as_ptr()) };
-            *self.backend.borrow_mut() = Backend::Wayland(clipboard);
+            *self.backend.borrow_mut() = Backend::Wayland(Arc::new(clipboard));
             tracing::debug!(target: "zgui::platform", "the compositor's own data device is in use");
         }
     }
@@ -136,43 +184,31 @@ impl DesktopClipboard {
     fn choose(&self, display: &dyn HasDisplayHandle) {
         let _ = display;
     }
+}
 
-    /// What is on `kind`, as text.
-    fn text(&self, kind: ClipboardKind) -> Result<String, ClipboardError> {
-        match &mut *self.backend.borrow_mut() {
-            Backend::Desktop(desktop) => desktop.text(kind),
-            #[cfg(any(
-                target_os = "linux",
-                target_os = "dragonfly",
-                target_os = "freebsd",
-                target_os = "netbsd",
-                target_os = "openbsd"
-            ))]
-            Backend::Wayland(wayland) => wayland.text(kind),
-        }
+const fn is_format_supported(format: ClipboardFormat) -> bool {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    {
+        matches!(
+            format,
+            ClipboardFormat::Text | ClipboardFormat::FileList | ClipboardFormat::Image
+        )
     }
-
-    /// Puts `text` on `kind`.
-    fn set_text(
-        &self,
-        kind: ClipboardKind,
-        text: String,
-        secret: bool,
-    ) -> Result<(), ClipboardError> {
-        match &mut *self.backend.borrow_mut() {
-            Backend::Desktop(desktop) => desktop.set_text(kind, text, secret),
-            #[cfg(any(
-                target_os = "linux",
-                target_os = "dragonfly",
-                target_os = "freebsd",
-                target_os = "netbsd",
-                target_os = "openbsd"
-            ))]
-            Backend::Wayland(wayland) => {
-                wayland.set_text(kind, text);
-                Ok(())
-            }
-        }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )))]
+    {
+        matches!(format, ClipboardFormat::Text)
     }
 }
 
@@ -185,17 +221,58 @@ impl core::fmt::Debug for DesktopClipboard {
 impl Clipboard for DesktopClipboard {
     fn read(&self, kind: ClipboardKind, format: ClipboardFormat) -> ClipboardSerial {
         let serial = self.serials.take();
-        let result = self.read_blocking(kind, format);
-        // A desktop can answer at once, so the answer is delivered before this returns rather than
-        // waiting for something to poll. The shape is still the asynchronous one, because it is the
-        // one every platform can satisfy and the one a caller has to be written against.
-        if let Some(waker) = self.waker.borrow().as_ref() {
-            waker.wake(WakeReason::ClipboardRead { serial, result });
-        } else {
+        let Some(waker) = self.waker.borrow().clone() else {
             tracing::warn!(
                 target: "zgui::platform",
                 "a clipboard read was started before the loop could answer it"
             );
+            return serial;
+        };
+        if !is_format_supported(format) {
+            waker.wake(WakeReason::ClipboardRead {
+                serial,
+                result: Err(ClipboardError::UnsupportedFormat(format)),
+            });
+            return serial;
+        }
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        {
+            enum Target {
+                X11(Arc<x11::X11>),
+                Wayland(Arc<wayland::Wayland>),
+            }
+            let target = match &*self.backend.borrow() {
+                Backend::X11(x11) => Target::X11(Arc::clone(x11)),
+                Backend::Wayland(wayland) => Target::Wayland(Arc::clone(wayland)),
+            };
+            let _ = std::thread::Builder::new()
+                .name("zgui-clipboard".to_owned())
+                .spawn(move || {
+                    let result = match target {
+                        Target::X11(x11) => x11.read(kind, format, x11::PATIENCE),
+                        Target::Wayland(wayland) => wayland.read(kind, format, wayland::PATIENCE),
+                    };
+                    waker.wake(WakeReason::ClipboardRead { serial, result });
+                });
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        )))]
+        {
+            let result = match &mut *self.backend.borrow_mut() {
+                Backend::Desktop(desktop) => desktop.read(kind, format),
+            };
+            waker.wake(WakeReason::ClipboardRead { serial, result });
         }
         serial
     }
@@ -205,10 +282,35 @@ impl Clipboard for DesktopClipboard {
         kind: ClipboardKind,
         format: ClipboardFormat,
     ) -> Result<ClipboardData, ClipboardError> {
-        if format != ClipboardFormat::Text {
+        if !is_format_supported(format) {
             return Err(ClipboardError::UnsupportedFormat(format));
         }
-        self.text(kind).map(|text| ClipboardData::Text(text.into()))
+        match &mut *self.backend.borrow_mut() {
+            #[cfg(not(any(
+                target_os = "linux",
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            )))]
+            Backend::Desktop(desktop) => desktop.read(kind, format),
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            ))]
+            Backend::X11(x11) => x11.read(kind, format, x11::IMPATIENCE),
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            ))]
+            Backend::Wayland(wayland) => wayland.read(kind, format, wayland::IMPATIENCE),
+        }
     }
 
     fn write(
@@ -217,14 +319,169 @@ impl Clipboard for DesktopClipboard {
         data: ClipboardData,
         options: ClipboardWriteOptions,
     ) -> Result<(), ClipboardError> {
-        let ClipboardData::Text(text) = data else {
+        if !is_format_supported(data.format()) {
             return Err(ClipboardError::UnsupportedFormat(data.format()));
+        }
+        let _ = options.exclude_from_history;
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        )))]
+        if let Backend::Desktop(desktop) = &mut *self.backend.borrow_mut() {
+            let ClipboardData::Text(text) = data else {
+                return Err(ClipboardError::UnsupportedFormat(data.format()));
+            };
+            return desktop.set_text(kind, text.as_str().to_owned(), options.exclude_from_history);
+        }
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        {
+            let entries = mime::data_to_mimes(data)?;
+            self.write_mime(kind, &entries, None)
+        }
+    }
+
+    fn read_mime(
+        &self,
+        kind: ClipboardKind,
+        mime_types: &[String],
+        max_bytes: usize,
+    ) -> ClipboardSerial {
+        let serial = self.serials.take();
+        let Some(waker) = self.waker.borrow().clone() else {
+            tracing::warn!(
+                target: "zgui::platform",
+                "a clipboard read was started before the loop could answer it"
+            );
+            return serial;
         };
-        self.set_text(kind, text.as_str().to_owned(), options.exclude_from_history)
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        {
+            enum Target {
+                X11(Arc<x11::X11>),
+                Wayland(Arc<wayland::Wayland>),
+            }
+            let target = match &*self.backend.borrow() {
+                Backend::X11(x11) => Target::X11(Arc::clone(x11)),
+                Backend::Wayland(wayland) => Target::Wayland(Arc::clone(wayland)),
+            };
+            let mime_types = mime_types.to_vec();
+            let _ = std::thread::Builder::new()
+                .name("zgui-clipboard".to_owned())
+                .spawn(move || {
+                    let result = match target {
+                        Target::X11(x11) => {
+                            x11.read_mime(kind, &mime_types, max_bytes, x11::PATIENCE)
+                        }
+                        Target::Wayland(wayland) => {
+                            wayland.read_mime(kind, &mime_types, max_bytes, wayland::PATIENCE)
+                        }
+                    };
+                    waker.wake(WakeReason::ClipboardMimeRead { serial, result });
+                });
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        )))]
+        {
+            let result = match &mut *self.backend.borrow_mut() {
+                Backend::Desktop(desktop) => desktop.read_mime(kind, mime_types, max_bytes),
+            };
+            waker.wake(WakeReason::ClipboardMimeRead { serial, result });
+        }
+        serial
+    }
+
+    fn read_mime_blocking(
+        &self,
+        kind: ClipboardKind,
+        mime_types: &[String],
+        max_bytes: usize,
+    ) -> Result<ClipboardMimeOffer, ClipboardError> {
+        match &mut *self.backend.borrow_mut() {
+            #[cfg(not(any(
+                target_os = "linux",
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            )))]
+            Backend::Desktop(desktop) => desktop.read_mime(kind, mime_types, max_bytes),
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            ))]
+            Backend::X11(x11) => x11.read_mime(kind, mime_types, max_bytes, x11::IMPATIENCE),
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            ))]
+            Backend::Wayland(wayland) => {
+                wayland.read_mime(kind, mime_types, max_bytes, wayland::IMPATIENCE)
+            }
+        }
+    }
+
+    fn write_mime(
+        &self,
+        kind: ClipboardKind,
+        entries: &[ClipboardMime],
+        expected_revision: Option<u64>,
+    ) -> Result<(), ClipboardError> {
+        match &mut *self.backend.borrow_mut() {
+            #[cfg(not(any(
+                target_os = "linux",
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            )))]
+            Backend::Desktop(desktop) => desktop.write_mime(kind, entries, expected_revision),
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            ))]
+            Backend::X11(x11) => x11.write_mime(kind, entries, expected_revision),
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            ))]
+            Backend::Wayland(wayland) => wayland.write_mime(kind, entries, expected_revision),
+        }
     }
 
     fn clear(&self, kind: ClipboardKind) -> Result<(), ClipboardError> {
-        self.set_text(kind, String::new(), false)
+        self.write_mime(kind, &[], None)
     }
 }
 
@@ -234,45 +491,35 @@ mod tests {
     use zgui_platform::{Clipboard, ClipboardData, ClipboardFormat, ClipboardKind};
 
     #[test]
-    fn a_representation_this_boundary_cannot_carry_is_refused_rather_than_emptied() {
-        // An empty answer and a refusal mean opposite things to a caller deciding whether to offer
-        // a paste command: one greys it out, the other hides it.
+    fn html_representation_is_refused_permanently() {
         let clipboard = DesktopClipboard::new();
-        for format in [
-            ClipboardFormat::Html,
-            ClipboardFormat::FileList,
-            ClipboardFormat::Image,
-        ] {
-            let refusal = clipboard
-                .read_blocking(ClipboardKind::Standard, format)
-                .expect_err("this boundary carries only text");
-            assert!(
-                refusal.is_permanent(),
-                "{format:?} was refused as if it might work later"
-            );
-        }
+        let refusal = clipboard
+            .read_blocking(ClipboardKind::Standard, ClipboardFormat::Html)
+            .expect_err("html is not supported on this backend");
+        assert!(refusal.is_permanent());
     }
 
     #[test]
-    fn writing_something_that_is_not_text_is_refused_without_touching_the_desktop() {
+    fn writing_html_is_refused_without_touching_the_desktop() {
         let clipboard = DesktopClipboard::new();
         let refusal = clipboard
             .write(
                 ClipboardKind::Standard,
-                ClipboardData::FileList(Vec::new()),
+                ClipboardData::Html {
+                    markup: "<b>hi</b>".into(),
+                    text: None,
+                },
                 zgui_platform::ClipboardWriteOptions::default(),
             )
-            .expect_err("this boundary carries only text");
+            .expect_err("html write is not supported");
         assert!(refusal.is_permanent());
     }
 
     #[test]
     fn every_read_started_through_the_loop_gets_its_own_identity() {
-        // Two paste requests can be in flight at once — a slow selection owner and an impatient
-        // user produce it — and an answer with no identity would be applied to the wrong one.
         let clipboard = DesktopClipboard::new();
         let first = clipboard.read(ClipboardKind::Standard, ClipboardFormat::Html);
-        let second = clipboard.read(ClipboardKind::Standard, ClipboardFormat::Html);
+        let second = clipboard.read_mime(ClipboardKind::Standard, &[], 0);
         assert_ne!(first, second);
     }
 }

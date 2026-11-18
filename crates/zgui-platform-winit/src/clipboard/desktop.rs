@@ -1,7 +1,12 @@
 //! The clipboard as the rest of the desktop offers it.
 
 use arboard::Clipboard;
-use zgui_platform::{ClipboardError, ClipboardKind};
+use zgui_platform::{
+    ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardMime,
+    ClipboardMimeOffer,
+};
+
+use crate::clipboard::mime;
 
 /// The platform clipboard, over whichever protocol the desktop-wide library speaks.
 ///
@@ -12,6 +17,8 @@ use zgui_platform::{ClipboardError, ClipboardKind};
 pub(crate) struct Desktop {
     /// The connection, once something has asked for it.
     clipboard: Option<Clipboard>,
+    /// Monotonic revision per clipboard kind observed through this wrapper.
+    revisions: [u64; 2],
 }
 
 impl Desktop {
@@ -26,6 +33,18 @@ impl Desktop {
             .ok_or_else(|| ClipboardError::Backend("the clipboard could not be opened".to_owned()))
     }
 
+    /// Reads `format` from `kind`.
+    pub(crate) fn read(
+        &mut self,
+        kind: ClipboardKind,
+        format: ClipboardFormat,
+    ) -> Result<ClipboardData, ClipboardError> {
+        if format != ClipboardFormat::Text {
+            return Err(ClipboardError::UnsupportedFormat(format));
+        }
+        self.text(kind).map(|text| ClipboardData::Text(text.into()))
+    }
+
     /// What is on `kind`, as text.
     pub(crate) fn text(&mut self, kind: ClipboardKind) -> Result<String, ClipboardError> {
         let clipboard = self.connection()?;
@@ -36,6 +55,36 @@ impl Desktop {
         }
     }
 
+    /// Reads matching text MIME payloads from `kind`.
+    pub(crate) fn read_mime(
+        &mut self,
+        kind: ClipboardKind,
+        mime_types: &[String],
+        max_bytes: usize,
+    ) -> Result<ClipboardMimeOffer, ClipboardError> {
+        let text = self.text(kind)?;
+        let revision = self.revisions[kind_index(kind)];
+        let Some(wanted) = mime_types
+            .iter()
+            .find(|m| matches!(m.as_str(), "text/plain;charset=utf-8" | "text/plain"))
+        else {
+            return Ok(ClipboardMimeOffer {
+                revision,
+                entries: Vec::new(),
+            });
+        };
+        let bytes = text.into_bytes();
+        if bytes.len() > max_bytes {
+            return Err(ClipboardError::Backend(format!(
+                "clipboard payload exceeds {max_bytes} bytes"
+            )));
+        }
+        Ok(ClipboardMimeOffer {
+            revision,
+            entries: vec![ClipboardMime::new(wanted.clone(), bytes)],
+        })
+    }
+
     /// Puts `text` on `kind`, optionally asking clipboard managers not to record it.
     pub(crate) fn set_text(
         &mut self,
@@ -44,7 +93,41 @@ impl Desktop {
         secret: bool,
     ) -> Result<(), ClipboardError> {
         let clipboard = self.connection()?;
-        write(clipboard, kind, text, secret).map_err(|error| translate(error, kind))
+        write(clipboard, kind, text, secret).map_err(|error| translate(error, kind))?;
+        let idx = kind_index(kind);
+        self.revisions[idx] = self.revisions[idx].saturating_add(1);
+        Ok(())
+    }
+
+    /// Replaces `kind` with text extracted from `entries`, validating `expected_revision`.
+    pub(crate) fn write_mime(
+        &mut self,
+        kind: ClipboardKind,
+        entries: &[ClipboardMime],
+        expected_revision: Option<u64>,
+    ) -> Result<(), ClipboardError> {
+        let idx = kind_index(kind);
+        if expected_revision.is_some_and(|expected| expected != self.revisions[idx]) {
+            return Err(ClipboardError::Changed(kind));
+        }
+        if entries.is_empty() {
+            return self.set_text(kind, String::new(), false);
+        }
+        let Some(text) = entries
+            .iter()
+            .find(|entry| mime::best_text(std::slice::from_ref(&entry.mime_type)).is_some())
+            .and_then(|entry| std::str::from_utf8(&entry.bytes).ok())
+        else {
+            return Err(ClipboardError::UnsupportedFormat(ClipboardFormat::Text));
+        };
+        self.set_text(kind, text.to_owned(), false)
+    }
+}
+
+const fn kind_index(kind: ClipboardKind) -> usize {
+    match kind {
+        ClipboardKind::Primary => 1,
+        _ => 0,
     }
 }
 

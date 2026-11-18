@@ -129,6 +129,7 @@ impl SeatHandler for WaylandState {
                 self.link.unpointing();
                 self.seat.pointing = false;
                 self.seat.pointer_focus = None;
+                self.sync_clipboard_focus();
             }
             Capability::Touch => {
                 self.seat.offered.touch = false;
@@ -295,6 +296,7 @@ impl TouchHandler for WaylandState {
         let Some(target) = self.identify(&surface) else {
             return;
         };
+        self.clipboard.selections().set_focused(true);
         let at = crate::input::pointer::position(position.0, position.1);
         self.contacts.down(id, target, at);
         self.contact(target, id, at, PointerAction::Pressed);
@@ -395,6 +397,13 @@ impl WaylandState {
         self.clipboard.selections().observed(serial);
     }
 
+    /// Synchronizes whether any window holds seat focus for clipboard ownership checks.
+    fn sync_clipboard_focus(&self) {
+        self.clipboard
+            .selections()
+            .set_focused(self.seat.keyboard_focus.is_some() || self.seat.pointer_focus.is_some());
+    }
+
     /// Tells a surface's accessibility channel whether it has the keyboard.
     ///
     /// A screen reader follows the focused window, and one that is never told stays pointed at
@@ -432,6 +441,7 @@ impl WaylandState {
         let Some((left, gained)) = self.seat.focus(surface) else {
             return;
         };
+        self.sync_clipboard_focus();
         if let Some(left) = left.filter(|left| Some(*left) != surface) {
             self.a11y_focus(left, false);
             self.report(left, SurfaceEvent::Focused(false));
@@ -490,6 +500,7 @@ impl WaylandState {
             PointerEventKind::Enter { serial } => {
                 self.observed(*serial);
                 self.seat.pointer_focus = Some(id);
+                self.sync_clipboard_focus();
                 self.link.over(Some(id));
                 // No motion follows an enter unless the pointer keeps moving, so one is made here:
                 // without it nothing under the pointer knows it is being hovered.
@@ -498,6 +509,7 @@ impl WaylandState {
             PointerEventKind::Leave { serial } => {
                 self.observed(*serial);
                 self.seat.pointer_focus = None;
+                self.sync_clipboard_focus();
                 self.link.over(None);
                 Some((PointerAction::Left, None))
             }
@@ -507,8 +519,7 @@ impl WaylandState {
                 serial,
                 ..
             } => {
-                self.seat.serials.pressed(*serial);
-                self.link.pressed(*serial);
+                self.pressed(*serial);
                 Some((PointerAction::Pressed, Some(button::button(*code))))
             }
             PointerEventKind::Release {

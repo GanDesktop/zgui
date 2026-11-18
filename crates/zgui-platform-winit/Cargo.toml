@@ -72,7 +72,13 @@ harness = false
 # the desktop-wide library is the whole of the clipboard, and this crate's Wayland stack does not
 # compile at all: it reaches for `std::os::unix` on Windows and for a pipe flag Apple does not have.
 [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
-smithay-clipboard.workspace = true
+calloop.workspace = true
+calloop-wayland-source.workspace = true
+rustix.workspace = true
+smithay-client-toolkit.workspace = true
+wayland-backend.workspace = true
+wayland-client.workspace = true
+x11rb.workspace = true
 
 # The application menu, the reopen request and the title-bar buttons, which only AppKit has.
 [target.'cfg(target_os = "macos")'.dependencies]

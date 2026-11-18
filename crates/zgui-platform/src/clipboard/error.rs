@@ -30,6 +30,12 @@ pub enum ClipboardError {
     /// The owner of the selection did not answer in time.
     #[error("the clipboard owner did not answer")]
     TimedOut,
+    /// The clipboard offer changed before a compare-and-swap write ran.
+    #[error("the {0:?} clipboard changed before the write completed")]
+    Changed(ClipboardKind),
+    /// Writing to the clipboard requires window or input focus, and none is held.
+    #[error("this application lacks focus to write the {0:?} clipboard")]
+    NotFocused(ClipboardKind),
     /// The platform refused, in its own words.
     #[error("{0}")]
     Backend(String),
@@ -55,6 +61,8 @@ mod tests {
         assert!(ClipboardError::UnsupportedKind(ClipboardKind::Primary).is_permanent());
         assert!(ClipboardError::UnsupportedFormat(ClipboardFormat::Image).is_permanent());
         assert!(!ClipboardError::Empty(ClipboardKind::Standard).is_permanent());
+        assert!(!ClipboardError::Changed(ClipboardKind::Standard).is_permanent());
+        assert!(!ClipboardError::NotFocused(ClipboardKind::Standard).is_permanent());
         assert!(!ClipboardError::TimedOut.is_permanent());
     }
 

@@ -101,6 +101,34 @@ impl From<&str> for ClipboardData {
     }
 }
 
+/// A single media-type payload stored on or read from a clipboard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipboardMime {
+    /// The media type, such as `"text/plain;charset=utf-8"` or `"image/png"`.
+    pub mime_type: String,
+    /// The raw bytes carried for [`Self::mime_type`].
+    pub bytes: Vec<u8>,
+}
+
+impl ClipboardMime {
+    /// Creates a payload for `mime_type`.
+    pub fn new(mime_type: impl Into<String>, bytes: impl Into<Vec<u8>>) -> Self {
+        Self {
+            mime_type: mime_type.into(),
+            bytes: bytes.into(),
+        }
+    }
+}
+
+/// Matched MIME payloads read atomically from a single clipboard offer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipboardMimeOffer {
+    /// Monotonic revision of the observed clipboard offer for this clipboard kind.
+    pub revision: u64,
+    /// Matched payloads in request order.
+    pub entries: Vec<ClipboardMime>,
+}
+
 /// How a write should be treated by the desktop.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -123,7 +151,10 @@ impl ClipboardWriteOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClipboardData, ClipboardFormat, ClipboardKind, ClipboardWriteOptions};
+    use super::{
+        ClipboardData, ClipboardFormat, ClipboardKind, ClipboardMime, ClipboardMimeOffer,
+        ClipboardWriteOptions,
+    };
 
     #[test]
     fn content_reports_the_format_it_answers_for() {
@@ -157,5 +188,17 @@ mod tests {
         let secret = ClipboardWriteOptions::SECRET;
         assert!(secret.exclude_from_history);
         assert_ne!(secret, ClipboardWriteOptions::default());
+    }
+
+    #[test]
+    fn mime_offer_carries_revision_and_entries() {
+        let offer = ClipboardMimeOffer {
+            revision: 7,
+            entries: vec![ClipboardMime::new("image/png", [1_u8, 2, 3])],
+        };
+        assert_eq!(offer.revision, 7);
+        assert_eq!(offer.entries.len(), 1);
+        assert_eq!(offer.entries[0].mime_type, "image/png");
+        assert_eq!(offer.entries[0].bytes, [1, 2, 3]);
     }
 }
