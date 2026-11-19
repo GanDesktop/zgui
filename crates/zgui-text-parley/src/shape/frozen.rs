@@ -102,6 +102,8 @@ struct Piece {
     size: f32,
     /// Whether the engine emboldens the glyphs.
     embolden: bool,
+    /// The CSS weight the run asked for.
+    weight: f32,
     /// How far the engine shears the glyphs, in degrees.
     skew: f32,
     /// The brush slot.
@@ -234,13 +236,15 @@ pub(crate) fn freeze(
             }
             let run = glyph_run.run();
             let synthesis = run.synthesis();
+            let brush = glyph_run.style().brush;
             pieces.push(Piece {
                 font: run.font().clone(),
                 coords: run.normalized_coords().into(),
                 size: run.font_size(),
                 embolden: synthesis.embolden(),
+                weight: brush.weight,
                 skew: synthesis.skew().unwrap_or(0.0),
-                brush: glyph_run.style().brush.0,
+                brush: brush.slot,
                 start: glyph_run.offset(),
                 text_start: u32::try_from(run.text_range().start.saturating_sub(prefix))
                     .unwrap_or(u32::MAX),
@@ -403,6 +407,7 @@ impl Frozen {
                 &piece.coords,
                 piece.size,
                 piece.embolden,
+                piece.weight,
                 piece.skew,
                 piece.brush,
                 &glyphs,

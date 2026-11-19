@@ -3,12 +3,13 @@
 use zgui::prelude::*;
 use zgui::reactive::LocalStorage;
 use zgui::view::AttrName;
-use zgui::vocab::HasPopup;
+use zgui::vocab::{HasPopup, PointerButton};
 use zgui::{component, view};
 
 use crate::input::InputProps;
 use crate::listbox::Listbox;
 use crate::overlay::OverlayState;
+use crate::support::activate_on_press;
 use zgui_ui_primitives::Binding;
 
 /// A bare [`Input`](crate::Input) that narrows the enclosing listbox.
@@ -112,12 +113,29 @@ pub(crate) fn ComboboxField(
         })
         .a11y_from(semantics);
 
+    let on_click = handler(events::CLICK, move |ev: &mut EventCx<'_, events::Click>| {
+        if ev
+            .button
+            .is_some_and(|button| button != PointerButton::Primary)
+        {
+            return;
+        }
+        if !disabled.get_untracked() && !state.is_open_untracked() {
+            state.open();
+            if let Some(listbox) = listbox {
+                listbox.highlight_chosen();
+            }
+        }
+    });
+
     view! {
         Input(
             node_ref = {state.trigger()},
             value = typed,
             placeholder = placeholder.unwrap_or_default(),
             disabled = disabled,
+            on:pointer_down = activate_on_press(),
+            on:click = on_click,
             on:key_down = on_key_down,
             {..own},
             {..attrs},

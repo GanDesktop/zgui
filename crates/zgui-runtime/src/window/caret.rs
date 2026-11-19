@@ -59,6 +59,12 @@ impl Window {
         // This reports the full text input state. A field that gets focus before it has a box
         // cannot enable text input when focus moves, and this is the first moment it can.
         self.report_text_input();
+        if self.ime.target().is_some_and(|node| {
+            let document = self.document.borrow();
+            crate::window::input::takes_custom_ime(&document, node)
+        }) {
+            self.report_caret();
+        }
     }
 
     /// This frame's plan, and the absolute rectangles it will draw.

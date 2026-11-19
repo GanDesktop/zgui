@@ -93,7 +93,8 @@ impl Rasteriser {
             .normalized_coords(coords.as_deref().unwrap_or_default())
             .build();
         let image = renderer(key).render(&mut scaler, key.glyph)?;
-        Some(convert(&image))
+        let bold = f32::from_bits(key.synthetic_bold_bits);
+        Some(convert(&image, bold))
     }
 }
 
@@ -160,10 +161,6 @@ fn renderer(key: &GlyphKey) -> Render<'static> {
     // Positioning is in fractions of a pixel and the key carries the phase, so the same glyph at
     // four phases is four cache entries rather than an unbounded set.
     render.offset(Vector::new(key.offset.to_pixels(), 0.0));
-    let bold = f32::from_bits(key.synthetic_bold_bits);
-    if bold != 0.0 {
-        render.embolden(bold);
-    }
     let slant = f32::from_bits(key.synthetic_slant_bits);
     if slant != 0.0 {
         // A synthesised italic leans the glyph forward, which is a shear along x by the angle the

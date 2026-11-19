@@ -1771,6 +1771,17 @@ fn escape_puts_the_chosen_text_back_in_a_combobox_field() {
 }
 
 #[test]
+fn a_combobox_opened_by_clicking_its_input_opens_on_its_chosen_option() {
+    let view = || view! { ACountryCombobox(default_value = "ie") };
+    opens_on_the_chosen_option(
+        view,
+        "zui-combobox__input",
+        "zui-select__item",
+        Harness::click,
+    );
+}
+
+#[test]
 fn a_combobox_field_points_at_the_option_the_arrow_keys_are_on() {
     let harness = Harness::open();
     harness.mount(|| {

@@ -79,7 +79,10 @@ impl Lists {
                 WrapMode::Wrap => TextWrapMode::Wrap,
                 WrapMode::NoWrap => TextWrapMode::NoWrap,
             },
-            brush: SlotBrush(brush),
+            brush: SlotBrush {
+                slot: brush,
+                weight: style.weight,
+            },
             ..parley::TextStyle::default()
         }
     }

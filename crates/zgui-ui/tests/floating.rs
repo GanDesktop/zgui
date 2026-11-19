@@ -279,12 +279,16 @@ fn a_combobox_opens_when_its_field_is_asked_for_the_list_and_its_items_are_paint
     // still goes to the middle of the actual field rather than to a guessed coordinate.
     stage.press_named(zgui::vocab::NamedKey::Tab);
     let field = stage.focused().expect("tab reached the field");
+    assert_absent(&stage, "United Kingdom");
+
     stage.click(stage.centre_of(field));
+    stage.wait(SETTLED);
+    assert_painted(&stage, "United Kingdom");
+
+    stage.press_named(zgui::vocab::NamedKey::Escape);
     stage.wait(SETTLED);
     assert_absent(&stage, "United Kingdom");
 
-    // A combobox is a field before it is a list: a press puts the caret in it, and what asks for
-    // the list is asking for the list. That is the gesture, and it is the one measured here.
     stage.press_named(zgui::vocab::NamedKey::ArrowDown);
     stage.wait(SETTLED);
     assert_painted(&stage, "United Kingdom");

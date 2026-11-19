@@ -276,6 +276,9 @@ impl Window {
         // Whether an input method has provisional text on the screen right now, read *before* this
         // event is allowed to do anything, because the event may be the one that ends it.
         let composing = self.ime.is_composing();
+        if let SurfaceEvent::Ime(ime) = event {
+            self.ime.observe(ime);
+        }
         // Editing is the first of the framework's own behaviours, and it takes the event away from
         // the rest of them: space and enter activate whatever has focus, and a field that both
         // typed a space and clicked itself is neither. A key the editing model refused still falls
@@ -403,9 +406,6 @@ impl Window {
     /// holds by listening, because the document is not something a view reads.
     fn edit_focused(&mut self, event: &SurfaceEvent, timestamp: Timestamp) -> bool {
         let Some(node) = self.router.interaction().focus.focused() else {
-            if let SurfaceEvent::Ime(ime) = event {
-                self.ime.observe(ime);
-            }
             return false;
         };
         let edited = match event {
@@ -433,7 +433,6 @@ impl Window {
                 }
             }
             SurfaceEvent::Ime(ime) => {
-                self.ime.observe(ime);
                 let document = self.document.borrow();
                 self.editors.ime(&document, node, ime)
             }
@@ -584,6 +583,56 @@ impl Window {
     /// is in: a candidate window beside the field rather than beside the insertion point is
     /// visible, and is not wrong about which surface or which element is being typed into.
     fn caret_area(&self, node: zgui_dom::NodeKey) -> Option<zgui_platform::TextInput> {
+        let custom_ime = {
+            let document = self.document.borrow();
+            if !crate::editing::Editors::is_editable(&document, node)
+                && !takes_custom_ime(&document, node)
+            {
+                return None;
+            }
+            takes_custom_ime(&document, node)
+        };
+        if custom_ime {
+            let layout = self.layout.borrow();
+            let first = *layout.boxes_of(node).first()?;
+            let resolved = layout.layout_of(first)?;
+            let box_ = zgui_layout::fragment::transform::placed::window_box(
+                &layout,
+                first,
+                &self.host.placements(),
+            )
+            .unwrap_or_else(|| resolved.border_box());
+            let max_w = box_.size.width.0.max(0.0);
+            let max_h = box_.size.height.0.max(0.0);
+            let (dx, dy, height) = {
+                let document = self.document.borrow();
+                let index = document.store().index_of(node)?;
+                let element = zgui_dom::Node::new(document.store().core(index));
+                let dx = parse_ime_px(element, "data-zgui-ime-x")
+                    .map_or(0.0, |px| (px * self.scale).clamp(0.0, max_w));
+                let raw_y = parse_ime_px(element, "data-zgui-ime-y")
+                    .map(|px| (px * self.scale).clamp(0.0, max_h));
+                let raw_h = parse_ime_px(element, "data-zgui-ime-h")
+                    .map(|px| (px * self.scale).clamp(0.0, max_h));
+                match (raw_y, raw_h) {
+                    (Some(y), Some(h)) => (dx, y.clamp(0.0, (max_h - h).max(0.0)), h),
+                    (None, Some(h)) => (dx, 0.0, h),
+                    (Some(y), None) => (dx, y, (max_h - y).max(0.0)),
+                    (None, None) => (dx, 0.0, max_h),
+                }
+            };
+            let origin = zgui_geom::Point::new(
+                zgui_geom::DevicePx(box_.origin.x.0 + dx),
+                zgui_geom::DevicePx(box_.origin.y.0 + dy),
+            );
+            return Some(zgui_input::ime::caret_area(
+                origin,
+                zgui_geom::DevicePx(height),
+                zgui_geom::Scale::new(self.scale),
+                zgui_platform::TextInputPurpose::Normal,
+            ));
+        }
+
         // A secure field asks the input method for a password purpose: no prediction, no learning.
         let purpose = if self.editors.is_secure(node) {
             zgui_platform::TextInputPurpose::Password
@@ -633,6 +682,7 @@ impl Window {
         let editable = focused.filter(|node| {
             let document = self.document.borrow();
             crate::editing::Editors::is_editable(&document, *node)
+                || takes_custom_ime(&document, *node)
         });
         let area = editable.and_then(|node| self.caret_area(node));
         if let Some(told) = self.ime.focused(editable, area) {
@@ -1118,6 +1168,34 @@ impl Window {
             timestamp,
         );
     }
+}
+
+/// Whether `node` opts into custom surface IME hosting without an [`Editors`](crate::editing::Editors)
+/// DOM text projection.
+pub(crate) fn takes_custom_ime(document: &zgui_dom::Document, node: zgui_dom::NodeKey) -> bool {
+    if crate::editing::Editors::holds_text(document, node) {
+        return false;
+    }
+    let Some(index) = document.store().index_of(node) else {
+        return false;
+    };
+    let record = document.store().core(index);
+    record.kind() == zgui_dom::NodeKind::Element
+        && !record.ui_state().contains(zgui_vocab::UiState::DISABLED)
+        && zgui_dom::Node::new(record)
+            .attr("data-zgui-ime")
+            .is_some_and(|value| value.as_str() == "true")
+}
+
+/// Parses an optional finite CSS-pixel coordinate or extent attribute on a custom IME element.
+fn parse_ime_px(element: zgui_dom::Node<'_>, attr: &str) -> Option<f32> {
+    element
+        .attr(attr)?
+        .as_str()
+        .trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|value| value.is_finite())
 }
 
 /// Whether `key` still hangs, through its ancestors, from the document node `document`.
