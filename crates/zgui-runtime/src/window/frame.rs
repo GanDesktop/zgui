@@ -245,6 +245,11 @@ impl Window {
 
     /// Records when a frame is owed again after `outcome`, and what a presented frame resets.
     fn settle_retry(&mut self, outcome: FrameOutcome, now: Instant) {
+        // The renderer will repaint its entire target after a surface or device recovery.
+        // Emit the complete display list before that draw, even if only a hover changed.
+        if matches!(outcome, FrameOutcome::Skipped(SkipReason::Outdated) | FrameOutcome::Recovered) {
+            self.damage = DamageSet::full();
+        }
         self.retry_after = match outcome {
             FrameOutcome::Skipped(SkipReason::Timeout) => {
                 self.starved = true;
