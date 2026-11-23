@@ -1,14 +1,6 @@
-//! A file dragged from another application and dropped on a window arrives as a drop.
-//!
-//! The compositor completes a drop only when the destination accepted a media type and an action
-//! was chosen for it. Without either one, the compositor cancels the drop when the button comes up,
-//! and nothing reaches the application. So the drag here comes from a real source on a connection
-//! of its own, and the assertions are made on both ends: the application saw the paths dropped,
-//! and the source was told the drop finished with a copy.
-//!
-//! A drag of text goes first. The window takes only files, so it must not choose an action for
-//! that drag: a chosen action makes the source show a copy cursor over a window that then cancels
-//! the drop.
+//! Incoming Wayland drags negotiate MIME/actions dynamically through real view `drag_over`
+//! listeners without pre-reading the pipe on hover, and only send `wl_data_offer.finish` once
+//! the `drop` listener explicitly completes the `DropHandle` claimed via `EventCx::take_drop_handle`.
 
 #[cfg(any(
     target_os = "linux",
@@ -20,7 +12,6 @@
 #[path = "support/mod.rs"]
 mod support;
 
-/// Runs the test where the platform under test exists, and does nothing elsewhere.
 fn main() {
     #[cfg(any(
         target_os = "linux",
@@ -32,7 +23,6 @@ fn main() {
     supported::main();
 }
 
-/// The test, built only where the platform under test exists.
 #[cfg(any(
     target_os = "linux",
     target_os = "dragonfly",
@@ -49,59 +39,56 @@ mod supported {
 
     use wayland_client::protocol::wl_data_device_manager::DndAction;
     use zgui_platform::{
-        AppHandler, DragEvent, IdlePolicy, PlatformCx, SurfaceEvent, SurfaceId, WakeReason,
+        AppHandler, DragAction, DragActions, DragDecision, DragEvent, IdlePolicy, PlatformCx,
+        SurfaceEvent, SurfaceId, WakeReason,
     };
+    use zgui_runtime::App;
+    use zgui_view::event::events;
+    use zgui_view::{BuildCx, IntoView, View};
 
-    /// The text a drag with no files on it carries.
+    const CSS: &str = "root { display: block; width: 100%; height: 100% }
+                       .drop-zone { display: block; width: 100%; height: 100% }";
+
     const TEXT: &str = "a few dragged words";
-
-    /// The file list the source offers.
-    const PAYLOAD: &str = "file:///tmp/zgui%20dropped\r\n";
-
-    /// The path that list names.
-    const DROPPED: &str = "/tmp/zgui dropped";
-
-    /// Where the drag is let go, in thousandths of the output, on the destination's half.
+    const PAYLOAD_REJECTED: &str = "file:///tmp/zgui%20cancelled-move\r\n";
+    const PAYLOAD_ACCEPTED: &str = "file:///tmp/zgui%20dropped\r\n";
+    const DROPPED_REJECTED: &str = "/tmp/zgui cancelled-move";
+    const DROPPED_ACCEPTED: &str = "/tmp/zgui dropped";
     const TO: (u32, u32) = (250, 500);
 
-    /// Whether the drag was reported as having entered the window.
     static ENTERED: AtomicBool = AtomicBool::new(false);
-
-    /// The paths the window was told were dropped on it.
-    static DROPPED_PATHS: Mutex<Option<Vec<PathBuf>>> = Mutex::new(None);
-
-    /// What the source was told about each drag, or why no drag could start.
+    static DROPPED_RECORDS: Mutex<Vec<(Option<DragAction>, Vec<PathBuf>)>> = Mutex::new(Vec::new());
     static OUTCOMES: Mutex<Option<Result<Outcomes, String>>> = Mutex::new(None);
 
-    /// What the source was told about the text drag and the file drag.
-    type Outcomes = (support::drag_source::Outcome, support::drag_source::Outcome);
+    type Outcomes = (
+        support::drag_source::Outcome,
+        support::drag_source::Outcome,
+        support::drag_source::Outcome,
+    );
 
-    /// Starts the drag once the window is drawn, and ends the loop when the source is done.
     struct DropOnWindow<A: AppHandler> {
-        /// The application.
         inner: A,
-        /// Whether the drag has been started.
         started: bool,
-        /// How the source thread ends this loop.
         waker: Option<std::sync::Arc<dyn zgui_platform::Waker>>,
     }
 
     impl<A: AppHandler> AppHandler for DropOnWindow<A> {
         fn surfaces_available(&mut self, cx: &dyn PlatformCx) {
+            assert!(
+                cx.capabilities().drop_mime,
+                "Wayland backend should advertise drop_mime when wl_data_device is available"
+            );
             self.waker.get_or_insert_with(|| cx.waker());
             self.inner.surfaces_available(cx);
         }
 
         fn surface_event(&mut self, cx: &dyn PlatformCx, surface: SurfaceId, event: SurfaceEvent) {
-            match &event {
-                SurfaceEvent::Drag(DragEvent::Entered { .. }) => {
-                    ENTERED.store(true, Ordering::Relaxed);
-                }
-                SurfaceEvent::Drag(DragEvent::Dropped { paths, .. }) => {
-                    *DROPPED_PATHS.lock().expect("the record is not poisoned") =
-                        Some(paths.clone());
-                }
-                _ => {}
+            if let SurfaceEvent::Drag(DragEvent::Entered { ref paths, .. }) = event {
+                ENTERED.store(true, Ordering::Relaxed);
+                assert!(
+                    paths.is_empty(),
+                    "Wayland Entered must not pre-read paths over the pipe"
+                );
             }
             let drawn = matches!(event, SurfaceEvent::RedrawRequested);
             self.inner.surface_event(cx, surface, event);
@@ -112,13 +99,15 @@ mod supported {
             let Some(waker) = self.waker.clone() else {
                 return;
             };
-            // On a thread of its own, because the source waits for the compositor at every step and
-            // this loop has to keep answering the drag while it does.
             std::thread::spawn(move || {
                 let outcomes = support::drag_source::drag(TO, "text/plain;charset=utf-8", TEXT)
                     .and_then(|text| {
-                        support::drag_source::drag(TO, "text/uri-list", PAYLOAD)
-                            .map(|files| (text, files))
+                        support::drag_source::drag(TO, "text/uri-list", PAYLOAD_REJECTED).and_then(
+                            |rejected_move| {
+                                support::drag_source::drag(TO, "text/uri-list", PAYLOAD_ACCEPTED)
+                                    .map(|accepted_copy| (text, rejected_move, accepted_copy))
+                            },
+                        )
                     });
                 *OUTCOMES.lock().expect("the record is not poisoned") = Some(outcomes);
                 zgui_platform::Waker::wake(waker.as_ref(), WakeReason::DeviceLost);
@@ -146,7 +135,7 @@ mod supported {
     }
 
     pub(super) fn main() {
-        const PROPERTY: &str = "a file dragged from another application is dropped on the window";
+        const PROPERTY: &str = "incoming drags negotiate dynamically and only finish when DropHandle::complete is called";
 
         if !support::require_nested(PROPERTY) {
             return;
@@ -155,8 +144,64 @@ mod supported {
         support::tracing();
         support::watchdog(PROPERTY);
 
+        let runtime = App::new()
+            .with_title("file drop")
+            .with_application_id(support::APP_ID)
+            .with_size(400.0, 300.0)
+            .with_stylesheet(CSS)
+            .with_renderer(support::renderers())
+            .into_handler(|cx: &mut BuildCx<'_>| {
+                Box::new(
+                    zgui_elements::column()
+                        .class("drop-zone")
+                        .on(events::DRAG_OVER, |ev| {
+                            if !ev.offers_files() {
+                                ev.accept_drag(DragDecision::reject());
+                                return;
+                            }
+                            let seen = DROPPED_RECORDS.lock().expect("records lock").len();
+                            if seen == 0 {
+                                // First file drag negotiates Move, then rejects on drop.
+                                ev.accept_drag(DragDecision::accept(
+                                    "text/uri-list",
+                                    DragActions::COPY | DragActions::MOVE,
+                                    Some(DragAction::Move),
+                                ));
+                            } else {
+                                // Second file drag negotiates Copy, then completes on drop.
+                                ev.accept_drag(DragDecision::accept(
+                                    "text/uri-list",
+                                    DragActions::COPY,
+                                    Some(DragAction::Copy),
+                                ));
+                            }
+                        })
+                        .on(events::DROP, |ev| {
+                            let handle = ev
+                                .take_drop_handle()
+                                .expect("first drop listener should claim DropHandle");
+                            assert!(
+                                ev.take_drop_handle().is_none(),
+                                "DropHandle must only be claimed once"
+                            );
+                            let count = {
+                                let mut records = DROPPED_RECORDS.lock().expect("records lock");
+                                records.push((ev.action, ev.paths.clone()));
+                                records.len()
+                            };
+                            if count == 1 {
+                                handle.reject();
+                            } else {
+                                handle.complete();
+                            }
+                        })
+                        .into_view()
+                        .build(cx),
+                )
+            });
+
         let handler = DropOnWindow {
-            inner: match support::application("file drop") {
+            inner: match runtime {
                 Ok(runtime) => runtime,
                 Err(error) => {
                     support::skipped(PROPERTY, &format!("the runtime would not install: {error}"));
@@ -179,48 +224,61 @@ mod supported {
             );
             return;
         }
-        let (text, outcome) = match OUTCOMES.lock().expect("the record is not poisoned").take() {
-            Some(Ok(outcomes)) => outcomes,
-            Some(Err(reason)) => {
-                support::skipped(PROPERTY, &format!("no drag could start here: {reason}"));
-                return;
-            }
-            None => panic!("the source never reported"),
-        };
+        let (text, rejected_move, accepted_copy) =
+            match OUTCOMES.lock().expect("the record is not poisoned").take() {
+                Some(Ok(outcomes)) => outcomes,
+                Some(Err(reason)) => {
+                    support::skipped(PROPERTY, &format!("no drag could start here: {reason}"));
+                    return;
+                }
+                None => panic!("the source never reported"),
+            };
 
         assert!(
-            !text.claimed && text.cancelled,
-            "the window chose an action for a drag with no files on it: {text:?}"
+            !text.claimed && text.cancelled && !text.sent,
+            "unaccepted text drag must stay unclaimed and transfer zero bytes: {text:?}"
         );
         assert!(
             ENTERED.load(Ordering::Relaxed),
-            "the drag never entered the window: {outcome:?}"
+            "no drag entered the window"
         );
         assert!(
-            !outcome.cancelled,
-            "the compositor cancelled the drop: {outcome:?}"
-        );
-        assert!(
-            outcome.performed && outcome.finished,
-            "the drop was not performed and finished: {outcome:?}"
+            rejected_move.performed && rejected_move.rejected && !rejected_move.finished,
+            "rejecting a Move DropHandle must cancel without sending dnd_finished: {rejected_move:?}"
         );
         assert_eq!(
-            outcome.action,
+            rejected_move.action,
+            Some(DndAction::Move),
+            "first file drag should have negotiated Move: {rejected_move:?}"
+        );
+        assert!(
+            !accepted_copy.cancelled && accepted_copy.performed && accepted_copy.finished,
+            "completing a Copy DropHandle must send dnd_finished: {accepted_copy:?}"
+        );
+        assert_eq!(
+            accepted_copy.action,
             Some(DndAction::Copy),
-            "the drop was not a copy: {outcome:?}"
+            "second file drag should have negotiated Copy: {accepted_copy:?}"
         );
-        let paths = DROPPED_PATHS
-            .lock()
-            .expect("the record is not poisoned")
-            .clone();
+
+        let records = DROPPED_RECORDS.lock().expect("records lock").clone();
         assert_eq!(
-            paths,
-            Some(vec![PathBuf::from(DROPPED)]),
-            "the window was not told what was dropped on it"
+            records,
+            vec![
+                (
+                    Some(DragAction::Move),
+                    vec![PathBuf::from(DROPPED_REJECTED)]
+                ),
+                (
+                    Some(DragAction::Copy),
+                    vec![PathBuf::from(DROPPED_ACCEPTED)]
+                ),
+            ],
+            "destination did not observe the expected negotiated actions and paths"
         );
         support::passed(
             PROPERTY,
-            "text left unclaimed; files entered, dropped, finished as a copy",
+            "text rejected with 0 bytes sent; rejected Move never sent finish; completed Copy finished cleanly",
         );
     }
 }

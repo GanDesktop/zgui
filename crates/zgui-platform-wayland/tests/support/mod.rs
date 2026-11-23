@@ -12,6 +12,8 @@
 
 #[path = "drag_source.rs"]
 pub(crate) mod drag_source;
+#[path = "drop_target.rs"]
+pub(crate) mod drop_target;
 #[path = "fatal.rs"]
 pub(crate) mod fatal;
 #[path = "paste.rs"]

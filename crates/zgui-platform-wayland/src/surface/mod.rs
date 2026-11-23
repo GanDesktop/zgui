@@ -58,6 +58,10 @@ pub struct Links {
     pub ping: calloop::ping::Ping,
     /// How a surface reaches the seat.
     pub seat: Arc<SeatLink>,
+    /// Data device selections and outgoing drag source ownership.
+    pub selections: Arc<crate::clipboard::Selections>,
+    /// Incoming external drag offers for immediate hover negotiation.
+    pub drag: Arc<crate::input::Drag>,
     /// Where an assistive technology's questions are answered.
     pub waker: Arc<dyn zgui_platform::Waker>,
     /// The shell a pop-up's later requests are made against.
@@ -133,6 +137,10 @@ pub struct WaylandSurface {
     /// whichever surface asks. So the loop lends each surface a way to reach it, guarded by
     /// whether that surface is the one the pointer is actually on.
     seat: Arc<SeatLink>,
+    /// Shared data device ownership, used for starting outgoing native drags without a turn delay.
+    selections: Arc<crate::clipboard::Selections>,
+    /// Shared incoming drag offer registry, used to answer hover negotiation immediately.
+    drag: Arc<crate::input::Drag>,
 }
 
 impl WaylandSurface {
@@ -168,6 +176,8 @@ impl WaylandSurface {
             compositor_gpu_hint: links.compositor_gpu_hint,
             a11y: A11y::open(id, links.waker),
             seat: links.seat,
+            selections: links.selections,
+            drag: links.drag,
         })
     }
 
@@ -793,6 +803,23 @@ impl Surface for WaylandSurface {
 
     fn begin_resize_drag(&self, edge: zgui_platform::ResizeEdge) -> Result<(), Unsupported> {
         chrome::begin_resize_drag(self, edge)
+    }
+
+    fn start_drag(
+        &self,
+        request: zgui_platform::DragSourceRequest,
+    ) -> Result<zgui_platform::DragSessionId, PlatformError> {
+        let serial = self.seat.data_drag_serial(self.id, request.serial)?;
+        self.selections
+            .start_drag(self.id, self.wl_surface(), serial, request)
+    }
+
+    fn respond_drag_offer(
+        &self,
+        offer: zgui_platform::DragOfferId,
+        decision: zgui_platform::DragDecision,
+    ) {
+        self.drag.respond(self.id, offer, decision);
     }
 
     fn set_text_input(&self, state: Option<TextInput>) {

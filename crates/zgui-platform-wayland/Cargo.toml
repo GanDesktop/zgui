@@ -90,6 +90,16 @@ path = "tests/file_drop.rs"
 harness = false
 
 [[test]]
+name = "drag_source"
+path = "tests/drag_source.rs"
+harness = false
+
+[[test]]
+name = "drag_mime"
+path = "tests/drag_mime.rs"
+harness = false
+
+[[test]]
 name = "wake_idle"
 path = "tests/wake_idle.rs"
 harness = false

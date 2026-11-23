@@ -25,19 +25,23 @@
 //! what lets the code above be the same code on every platform.
 
 mod drag;
+mod drag_source;
 mod focus;
 mod handle;
 mod layer;
 mod options;
 pub(crate) mod popup;
 mod region;
+pub(crate) mod snapshot;
 
+pub use crate::windows::drag_source::DragSourceGuard;
 pub use crate::windows::focus::FocusGuard;
 pub use crate::windows::handle::{WindowHandle, WindowId};
 pub use crate::windows::layer::LayerOptions;
 pub use crate::windows::options::WindowOptions;
 pub use crate::windows::popup::PopupOptions;
 pub use crate::windows::region::use_input_region;
+pub use crate::windows::snapshot::{RenderedView, ViewSnapshotOptions};
 
 use std::cell::RefCell;
 use std::rc::Rc;

@@ -43,16 +43,6 @@ impl WaylandState {
     }
 }
 
-/// Copy and nothing else. A move would ask the source to delete what it handed over, and this
-/// application has no way to promise it took responsibility for it.
-pub(crate) fn copy_only(actions: DndAction) -> DndAction {
-    if actions.contains(DndAction::Copy) {
-        DndAction::Copy
-    } else {
-        DndAction::None
-    }
-}
-
 impl DataDeviceHandler for WaylandState {
     fn enter(
         &mut self,
@@ -72,9 +62,10 @@ impl DataDeviceHandler for WaylandState {
         else {
             return;
         };
-        self.drag
-            .entered(id, offer, crate::input::pointer::position(x, y));
-        self.start_drag_read();
+        let (surface_id, event) =
+            self.drag
+                .entered(id, offer, crate::input::pointer::position(x, y));
+        self.report(surface_id, SurfaceEvent::Drag(event));
     }
 
     fn motion(
@@ -103,9 +94,7 @@ impl DataDeviceHandler for WaylandState {
         _qh: &QueueHandle<Self>,
         _device: &WlDataDevice,
     ) {
-        if let Some((id, event)) = self.drag.dropped() {
-            self.report(id, SurfaceEvent::Drag(event));
-        }
+        self.drag.dropped();
     }
 
     fn selection(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _device: &WlDataDevice) {
@@ -123,17 +112,19 @@ impl DataOfferHandler for WaylandState {
         offer: &mut DragOffer,
         actions: DndAction,
     ) {
-        let taken = copy_only(actions);
-        offer.set_actions(taken, taken);
+        self.drag.source_actions_changed(offer, actions);
     }
 
     fn selected_action(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _offer: &mut DragOffer,
-        _actions: DndAction,
+        offer: &mut DragOffer,
+        actions: DndAction,
     ) {
+        if let Some((id, event)) = self.drag.selected_action_changed(offer, actions) {
+            self.report(id, SurfaceEvent::Drag(event));
+        }
     }
 }
 
@@ -146,12 +137,22 @@ impl DataSourceHandler for WaylandState {
         mime: String,
         destination: WritePipe,
     ) {
-        self.clipboard
+        if let Err(destination) = self
+            .clipboard
             .selections()
-            .serve(source, &mime, destination);
+            .serve_drag(source, &mime, destination)
+        {
+            self.clipboard
+                .selections()
+                .serve(source, &mime, destination);
+        }
     }
 
     fn cancelled(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, source: &WlDataSource) {
+        if let Some((origin, event)) = self.clipboard.selections().drag_cancelled(source) {
+            self.report(origin, SurfaceEvent::DragSource(event));
+            return;
+        }
         // Somebody else took the selection. Letting go here is what stops this application from
         // answering for a clipboard it no longer owns.
         self.clipboard.selections().lost(source);
@@ -161,29 +162,36 @@ impl DataSourceHandler for WaylandState {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _source: &WlDataSource,
-        _mime: Option<String>,
+        source: &WlDataSource,
+        mime: Option<String>,
     ) {
+        if let Some((origin, event)) = self.clipboard.selections().drag_target(source, mime) {
+            self.report(origin, SurfaceEvent::DragSource(event));
+        }
     }
 
-    fn dnd_dropped(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _source: &WlDataSource) {
+    fn dnd_dropped(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, source: &WlDataSource) {
+        if let Some((origin, event)) = self.clipboard.selections().drag_dropped(source) {
+            self.report(origin, SurfaceEvent::DragSource(event));
+        }
     }
 
-    fn dnd_finished(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _source: &WlDataSource,
-    ) {
+    fn dnd_finished(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, source: &WlDataSource) {
+        if let Some((origin, event)) = self.clipboard.selections().drag_finished(source) {
+            self.report(origin, SurfaceEvent::DragSource(event));
+        }
     }
 
     fn action(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _source: &WlDataSource,
-        _action: DndAction,
+        source: &WlDataSource,
+        action: DndAction,
     ) {
+        if let Some((origin, event)) = self.clipboard.selections().drag_action(source, action) {
+            self.report(origin, SurfaceEvent::DragSource(event));
+        }
     }
 }
 

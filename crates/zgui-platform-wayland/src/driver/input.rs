@@ -296,6 +296,7 @@ impl TouchHandler for WaylandState {
         let Some(target) = self.identify(&surface) else {
             return;
         };
+        self.link.touch_pressed(target, id, serial);
         self.clipboard.selections().set_focused(true);
         let at = crate::input::pointer::position(position.0, position.1);
         self.contacts.down(id, target, at);
@@ -312,6 +313,7 @@ impl TouchHandler for WaylandState {
         id: i32,
     ) {
         self.observed(serial);
+        self.link.touch_released(id);
         // The release carries no position, so it lands where the finger last was.
         let Some((target, at)) = self.contacts.up(id) else {
             return;
@@ -358,6 +360,7 @@ impl TouchHandler for WaylandState {
     }
 
     fn cancel(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _touch: &WlTouch) {
+        self.link.touch_cancelled();
         self.cancel_contacts();
     }
 }
@@ -520,6 +523,7 @@ impl WaylandState {
                 ..
             } => {
                 self.pressed(*serial);
+                self.link.pointer_pressed(id, *code, *serial);
                 Some((PointerAction::Pressed, Some(button::button(*code))))
             }
             PointerEventKind::Release {
@@ -528,6 +532,7 @@ impl WaylandState {
                 ..
             } => {
                 self.observed(*serial);
+                self.link.pointer_released(*code);
                 Some((PointerAction::Released, Some(button::button(*code))))
             }
             PointerEventKind::Axis {

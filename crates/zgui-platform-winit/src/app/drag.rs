@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use zgui_geom::{Css, CssPx, Point};
-use zgui_platform::DragEvent;
+use zgui_platform::{DragAction, DragActions, DragEvent, DragOfferId, DropHandle};
 
 /// A drag in flight over one window.
 ///
@@ -52,20 +52,31 @@ impl Drag {
     /// drop it was never told to expect has had no chance to say whether it would accept one.
     pub fn take(&mut self, position: Point<CssPx, Css>) -> Vec<DragEvent> {
         let mut events = Vec::new();
+        let offer = DragOfferId::new(0);
         if !self.hovering.is_empty() {
             events.push(DragEvent::Entered {
+                offer,
+                mime_types: vec!["text/uri-list".to_owned()],
+                source_actions: DragActions::COPY,
+                action: Some(DragAction::Copy),
                 paths: core::mem::take(&mut self.hovering),
                 position,
             });
         }
         if !self.dropped.is_empty() {
             events.push(DragEvent::Dropped {
+                offer,
+                mime_types: vec!["text/uri-list".to_owned()],
+                source_actions: DragActions::COPY,
+                action: Some(DragAction::Copy),
                 paths: core::mem::take(&mut self.dropped),
+                payload: None,
                 position,
+                handle: DropHandle::noop(),
             });
         }
         if core::mem::take(&mut self.left) {
-            events.push(DragEvent::Left);
+            events.push(DragEvent::Left { offer });
         }
         events
     }
@@ -121,7 +132,8 @@ mod tests {
         drag.left();
         assert!(drag.is_pending());
         let events = drag.take(at(0.0));
-        assert_eq!(events, vec![DragEvent::Left]);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], DragEvent::Left { .. }));
         assert!(!drag.is_pending(), "the departure was announced twice");
     }
 }

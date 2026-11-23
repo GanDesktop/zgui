@@ -97,7 +97,7 @@ impl Window {
     /// stream of pointer moves is.
     pub(crate) fn drain_input(&mut self, timestamp: Timestamp) -> bool {
         let mut owed = false;
-        let events = core::mem::take(&mut self.queued);
+        let mut events = core::mem::take(&mut self.queued);
         // The answers to paste requests an earlier frame recorded, applied ahead of this frame's
         // own events and settled like one of them, so a handler for the input a paste announces
         // has mounted whatever it opens before the next event is routed. A paste carries the
@@ -111,11 +111,11 @@ impl Window {
             owed |= self.settle_between_events(earliest);
         }
         let last = events.len().saturating_sub(1);
-        for (position, queued) in events.iter().enumerate() {
+        for (position, queued) in events.iter_mut().enumerate() {
             // Each event and the events it causes carry the moment the platform stamped it. Events
             // without a stamp carry the frame's moment.
             let stamp = queued.event.timestamp().unwrap_or(timestamp);
-            self.dispatch_one(&queued.event, &queued.samples, stamp);
+            self.dispatch_one(&mut queued.event, &queued.samples, stamp);
             if position < last {
                 owed |= self.settle_between_events(stamp);
             }
@@ -142,7 +142,7 @@ impl Window {
     /// Dispatches one platform event, with the pointer moves that were folded into it.
     fn dispatch_one(
         &mut self,
-        event: &SurfaceEvent,
+        event: &mut SurfaceEvent,
         samples: &[zgui_vocab::PointerSample],
         timestamp: Timestamp,
     ) {
@@ -151,6 +151,10 @@ impl Window {
         // behalf — a composition, a value nobody has been told about, a pointer's leavings.
         if let Some(focused) = Self::surface_focus_of(event) {
             self.surface_focus_changed(focused, timestamp);
+            return;
+        }
+        if let SurfaceEvent::DragSource(drag_source) = event {
+            self.handle.drag_source_event(drag_source);
             return;
         }
         let modifiers = event.modifiers().unwrap_or(Modifiers::NONE);
@@ -265,11 +269,25 @@ impl Window {
             return;
         }
 
+        let drop_handle = match event {
+            SurfaceEvent::Drag(zgui_platform::DragEvent::Dropped { handle, .. }) => handle.take(),
+            _ => None,
+        };
+
         let dispatched = {
             let host = std::rc::Rc::clone(&self.host);
             let mut sink = HostSink::new(&host);
-            dispatch::run(
-                self, &steps, kind, target, &payload, samples, modifiers, timestamp, &mut sink,
+            dispatch::run_with_drop_handle(
+                self,
+                &steps,
+                kind,
+                target,
+                &payload,
+                samples,
+                modifiers,
+                timestamp,
+                &mut sink,
+                drop_handle,
             )
         };
 
@@ -1131,8 +1149,8 @@ impl Window {
         event: EventKind,
         payload: Payload,
         timestamp: Timestamp,
-    ) {
-        self.dispatch_with(key, event, payload, Modifiers::NONE, timestamp);
+    ) -> dispatch::Dispatched {
+        self.dispatch_with(key, event, payload, Modifiers::NONE, timestamp)
     }
 
     /// The same, with the modifiers a handler reads off the event.
@@ -1143,7 +1161,7 @@ impl Window {
         payload: Payload,
         modifiers: Modifiers,
         timestamp: Timestamp,
-    ) {
+    ) -> dispatch::Dispatched {
         let steps = {
             let document = self.document.borrow();
             // An element that left the document between the ask and the dispatch has nothing left
@@ -1151,7 +1169,7 @@ impl Window {
             // is gone with it. A press that asked for a click, then set off a rebuild, is the
             // common case.
             if !is_connected(document.store(), document.document_index(), key) {
-                return;
+                return dispatch::Dispatched::default();
             }
             let chain = zgui_input::HitChain::to_root(document.store(), key);
             let mut plan = zgui_input::dispatch::Plan::default();
@@ -1166,7 +1184,7 @@ impl Window {
             &payload,
             modifiers,
             timestamp,
-        );
+        )
     }
 }
 

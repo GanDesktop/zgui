@@ -17,7 +17,9 @@ use crate::event::kind::EventKind;
 pub use crate::event::payload::animation::{
     AnimationEvent, AnimationPhase, Pseudo, TransitionEvent, TransitionPhase,
 };
-pub use crate::event::payload::drop::DropEvent;
+pub use crate::event::payload::drop::{
+    DragAction, DragActions, DragDecision, DragMime, DropEvent, DropHandle,
+};
 pub use crate::event::payload::focus::{FocusCause, FocusEvent};
 pub use crate::event::payload::ime::ImeEvent;
 pub use crate::event::payload::key::{

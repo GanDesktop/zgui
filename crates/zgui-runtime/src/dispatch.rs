@@ -14,12 +14,14 @@
 //! exists to prevent.
 
 use zgui_view::{DiscardCommands, EventControl, EventCx, EventSink, NodeId};
-use zgui_vocab::{DefaultAction, EventKind, Modifiers, Payload, Timestamp};
+use zgui_vocab::{
+    DefaultAction, DragDecision, DropHandle, EventKind, Modifiers, Payload, Timestamp,
+};
 
 use crate::host::{Command, RuntimeHost};
 
 /// What one dispatch produced.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Dispatched {
     /// How many handlers ran.
     pub called: usize,
@@ -27,6 +29,8 @@ pub struct Dispatched {
     pub default_allowed: bool,
     /// Whether a handler clicked the element itself, so the release must not click it again.
     pub activation_claimed: bool,
+    /// First drag-hover negotiation decision recorded by a handler on the path, if any.
+    pub drag_decision: Option<DragDecision>,
 }
 
 /// The commands a handler issues, routed to the host that carries them out.
@@ -96,15 +100,38 @@ pub fn run(
     timestamp: Timestamp,
     sink: &mut dyn EventSink,
 ) -> Dispatched {
+    run_with_drop_handle(
+        handlers, steps, kind, target, payload, samples, modifiers, timestamp, sink, None,
+    )
+}
+
+/// Runs listeners with an optional one-shot [`DropHandle`] exposed through
+/// [`EventCx::take_drop_handle`].
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_drop_handle(
+    handlers: &dyn Handlers,
+    steps: &[zgui_input::Step],
+    kind: EventKind,
+    target: Option<zgui_dom::NodeKey>,
+    payload: &Payload,
+    samples: &[zgui_vocab::PointerSample],
+    modifiers: Modifiers,
+    timestamp: Timestamp,
+    sink: &mut dyn EventSink,
+    drop_handle: Option<DropHandle>,
+) -> Dispatched {
     let Some(target) = target else {
+        // Dropping `drop_handle` here safely rejects an unroutable drop.
+        drop(drop_handle);
         return Dispatched {
             called: 0,
             default_allowed: true,
             activation_claimed: false,
+            drag_decision: None,
         };
     };
     let target = zgui_view_dom::id::to_view(target);
-    let control = EventControl::new();
+    let control = EventControl::new().with_drop_handle(drop_handle);
     let mut called = 0;
     let mut previous: Option<zgui_dom::NodeKey> = None;
 
@@ -140,6 +167,7 @@ pub fn run(
         called,
         default_allowed: control.default_action() == DefaultAction::Allowed,
         activation_claimed: control.activation_claimed(),
+        drag_decision: control.take_drag_decision(),
     }
 }
 

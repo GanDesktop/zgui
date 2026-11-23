@@ -67,9 +67,9 @@ pub use wgpu;
 pub use crate::effect::{
     EffectProgram, Effects, ParamsField, ParamsLayout, check_params as check_effect, declare,
 };
+pub use crate::gpu::CompositorGpuHint;
 #[cfg(target_arch = "wasm32")]
 pub use crate::gpu::canvas::Canvas;
-pub use crate::gpu::CompositorGpuHint;
 pub use crate::gpu::device::Gpu;
 pub use crate::gpu::formats::{Formats, SrgbTier};
 pub use crate::gpu::surface::PresentPacing;

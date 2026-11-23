@@ -1,5 +1,6 @@
 //! The desktop's clipboards, over the connection the window already owns.
 
+pub(crate) mod drag_icon;
 pub mod mime;
 pub mod pipe;
 pub mod selection;

@@ -38,6 +38,7 @@ impl Window {
         }
         self.scheme = scheme;
         self.viewport = self.viewport.in_scheme(scheme);
+        self.handle.record_color_scheme(scheme);
         true
     }
 

@@ -95,8 +95,8 @@ pub mod window;
 pub mod windows;
 
 pub use crate::app::{
-    App, ExitPolicy, Failure, MetricsFactory, RasterFactory, RendererFactory, Runtime, TextFactory,
-    ViewFactory,
+    App, ExitPolicy, Failure, MetricsFactory, OffscreenRendererFactory, RasterFactory,
+    RendererFactory, Runtime, TextFactory, ViewFactory,
 };
 pub use crate::binding::{HostBinding, NoBinding};
 pub use crate::budget::{BudgetReport, Budgeted, CacheId, CacheReport};
@@ -128,7 +128,8 @@ pub use crate::window::resize::ResizePace;
 pub use crate::window::text_aa::TextAntialiasing;
 pub use crate::window::{MAINTENANCE_DELAY, Window, WindowContent};
 pub use crate::windows::{
-    CloseGuard, FocusGuard, WindowHandle, WindowId, Windows, on_close_request, try_use_window,
-    try_use_windows, use_input_region, use_window, use_windows,
+    CloseGuard, DragSourceGuard, FocusGuard, RenderedView, ViewSnapshotOptions, WindowHandle,
+    WindowId, Windows, on_close_request, try_use_window, try_use_windows, use_input_region,
+    use_window, use_windows,
 };
 pub use crate::windows::{LayerOptions, PopupOptions, WindowOptions};

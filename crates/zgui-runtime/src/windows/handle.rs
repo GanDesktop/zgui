@@ -6,14 +6,19 @@ use std::sync::{Arc, Weak};
 
 use zgui_geom::{Css, CssPx, Edges, Point, Rect, Size};
 use zgui_platform::{
-    CloseReason, ColorScheme, CursorStyle, Decorations, FullscreenMode, LayerPatch,
-    PlatformCapabilities, ResizeEdge, Surface, WindowIcon, WindowLevel,
+    CloseReason, ColorScheme, CursorStyle, Decorations, DragSessionId, DragSourceEvent,
+    DragSourceRequest, FullscreenMode, LayerPatch, PlatformCapabilities, PlatformError, ResizeEdge,
+    Surface, WindowIcon, WindowLevel,
 };
 use zgui_reactive::prelude::*;
-use zgui_reactive::{ArcRwSignal, Signal};
+use zgui_reactive::{ArcRwSignal, Owner, Signal};
 use zgui_vocab::Modifiers;
 
 use crate::commands::{WindowCommands, WindowToken};
+use crate::error::AppError;
+use crate::windows::snapshot::{
+    RenderedView, SheetSnapshot, SnapshotEnv, ViewSnapshotOptions, render_view_snapshot,
+};
 
 /// Which window this is.
 ///
@@ -69,6 +74,8 @@ pub(crate) struct WindowShared {
     pub(crate) focused: ArcRwSignal<bool>,
     /// What hears about the window gaining and losing the keyboard.
     pub(crate) focus_listeners: Rc<RefCell<crate::windows::focus::FocusListeners>>,
+    /// What hears about lifecycle updates for native drags started from this window.
+    pub(crate) drag_source_listeners: Rc<RefCell<crate::windows::drag_source::DragSourceListeners>>,
     /// Whether the desktop says nothing of the window is visible.
     pub(crate) occluded: ArcRwSignal<bool>,
     /// Whether a frame of the window has reached the screen.
@@ -99,6 +106,12 @@ pub(crate) struct WindowShared {
     pub(crate) external_parent: RefCell<Option<(zgui_vocab::SharedString, bool)>>,
     /// One-shot activation token queued before the surface attaches.
     pub(crate) activation_token: RefCell<Option<zgui_vocab::SharedString>>,
+    /// Mirror of this window's stylesheets and active colour scheme for offscreen snapshots.
+    pub(crate) sheets: RefCell<SheetSnapshot>,
+    /// Shared runtime factories used to render offscreen view snapshots.
+    pub(crate) snapshot_env: RefCell<Option<Rc<SnapshotEnv>>>,
+    /// The window's reactive owner so snapshots inherit application and window contexts.
+    pub(crate) owner: RefCell<Option<Owner>>,
 }
 
 /// A region in CSS pixels, or `None` for the whole window.
@@ -134,6 +147,7 @@ impl WindowHandle {
                 // the runtime says so when it opens one.
                 focused: ArcRwSignal::new(true),
                 focus_listeners: Rc::default(),
+                drag_source_listeners: Rc::default(),
                 occluded: ArcRwSignal::new(false),
                 presented: ArcRwSignal::new(false),
                 maximized: ArcRwSignal::new(false),
@@ -148,8 +162,41 @@ impl WindowHandle {
                 opaque_region: RefCell::new(None),
                 external_parent: RefCell::new(None),
                 activation_token: RefCell::new(None),
+                sheets: RefCell::new(SheetSnapshot::default()),
+                snapshot_env: RefCell::new(None),
+                owner: RefCell::new(None),
             }),
         }
+    }
+
+    /// Gives this handle access to the runtime's shared offscreen snapshot environment.
+    pub(crate) fn attach_snapshot(&self, env: Rc<SnapshotEnv>) {
+        *self.shared.snapshot_env.borrow_mut() = Some(env);
+    }
+
+    /// Records the window's reactive owner so offscreen snapshots inherit its context tree.
+    pub(crate) fn attach_owner(&self, owner: Owner) {
+        *self.shared.owner.borrow_mut() = Some(owner);
+    }
+
+    /// Records the base stylesheets installed when the window opened.
+    pub(crate) fn seed_sheets(&self, sheets: impl IntoIterator<Item = String>) {
+        self.shared.sheets.borrow_mut().seed_base(sheets);
+    }
+
+    /// Records a view-installed stylesheet for offscreen snapshots.
+    pub(crate) fn record_view_sheet(&self, name: &str, css: &str) {
+        self.shared.sheets.borrow_mut().install_named(name, css);
+    }
+
+    /// Removes a view-installed stylesheet from the offscreen snapshot mirror.
+    pub(crate) fn remove_view_sheet(&self, name: &str) {
+        self.shared.sheets.borrow_mut().remove_named(name);
+    }
+
+    /// Records the active colour scheme for offscreen snapshots.
+    pub(crate) fn record_color_scheme(&self, scheme: zgui_style::ColorScheme) {
+        self.shared.sheets.borrow_mut().scheme = scheme;
     }
 
     /// Seeds window state from `surface` before the window's view is constructed.
@@ -196,6 +243,8 @@ impl WindowHandle {
     /// Records that the window has closed for good.
     pub(crate) fn note_closed(&self) {
         self.shared.closed.set(true);
+        *self.shared.owner.borrow_mut() = None;
+        *self.shared.snapshot_env.borrow_mut() = None;
         self.detach();
     }
 
@@ -238,6 +287,11 @@ impl WindowHandle {
     /// Tells the callbacks registered with [`WindowHandle::on_focus_change`] about an edge.
     pub(crate) fn focus_changed(&self, focused: bool) {
         crate::windows::focus::tell(&self.shared.focus_listeners, focused);
+    }
+
+    /// Tells the callbacks registered with [`WindowHandle::on_drag_source`] about an update.
+    pub(crate) fn drag_source_event(&self, event: &DragSourceEvent) {
+        crate::windows::drag_source::tell(&self.shared.drag_source_listeners, event);
     }
 
     /// Records which lock keys are on.
@@ -355,6 +409,17 @@ impl WindowHandle {
     /// matter.
     pub fn on_focus_change(&self, callback: impl FnMut(bool) + 'static) -> crate::FocusGuard {
         crate::windows::focus::listen(&self.shared.focus_listeners, callback)
+    }
+
+    /// Calls `callback` whenever an outgoing native drag started from this window changes state.
+    ///
+    /// The callback runs inside the frame that handles the event, as a listener does, and a signal
+    /// it reads is not subscribed to. Dropping the returned guard removes the callback.
+    pub fn on_drag_source(
+        &self,
+        callback: impl FnMut(DragSourceEvent) + 'static,
+    ) -> crate::DragSourceGuard {
+        crate::windows::drag_source::listen(&self.shared.drag_source_listeners, callback)
     }
 
     /// Which lock keys are on: [`Modifiers::CAPS_LOCK`] and [`Modifiers::NUM_LOCK`].
@@ -736,6 +801,69 @@ impl WindowHandle {
                 self.shared.drag_started.set(true);
             }
         });
+    }
+
+    /// Starts an outgoing native drag-and-drop session originating from this window.
+    ///
+    /// Once accepted by the platform, the compositor owns the pointer until the drag ends, so this
+    /// also signals the frame pipeline to clear any in-progress pointer press or capture in the
+    /// window's input router.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError::NoSuchSurface`] when the window is closed or not yet attached to a
+    /// surface, [`PlatformError::Unsupported`] when the running platform has no native drag source,
+    /// or [`PlatformError::Backend`] when the request preconditions are not met.
+    pub fn start_drag(&self, request: DragSourceRequest) -> Result<DragSessionId, PlatformError> {
+        if self.shared.closed.get() {
+            return Err(PlatformError::NoSuchSurface);
+        }
+        let Some(surface) = self.surface() else {
+            return Err(PlatformError::NoSuchSurface);
+        };
+        let session = surface.start_drag(request)?;
+        // The compositor owns the pointer now and no release will arrive for the press that
+        // started this drag, so tell the frame to end any press/capture the router is tracking.
+        self.shared.drag_started.set(true);
+        Ok(session)
+    }
+
+    /// Renders an arbitrary view offscreen using this window's stylesheets, theme colour scheme,
+    /// font collection and graphics device, returning straight-alpha `RGBA8` pixels suitable for a
+    /// [`WindowIcon`] or [`DragIcon`](zgui_platform::DragIcon).
+    ///
+    /// The view is built in an isolated temporary document under a short-lived child reactive
+    /// scope and torn down immediately after pixel readback, leaving the live window untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Platform`] with [`PlatformError::NoSuchSurface`] when the window is
+    /// closed, [`PlatformError::Unsupported`] when no offscreen renderer is configured or the
+    /// renderer does not support pixel readback, or [`AppError::GpuUnavailable`] /
+    /// [`AppError::DocumentsExhausted`] when offscreen rendering fails.
+    pub fn render_view<V: zgui_view::IntoView>(
+        &self,
+        options: ViewSnapshotOptions,
+        view: impl FnOnce() -> V,
+    ) -> Result<RenderedView, AppError> {
+        if self.shared.closed.get() {
+            return Err(PlatformError::NoSuchSurface.into());
+        }
+        let Some(env) = self.shared.snapshot_env.borrow().clone() else {
+            return Err(PlatformError::NoSuchSurface.into());
+        };
+        let parent_owner = self.shared.owner.borrow().clone();
+        let sheets = self.shared.sheets.borrow().clone();
+        let scale = self.shared.scale.get_untracked();
+        render_view_snapshot(
+            &env,
+            self,
+            parent_owner.as_ref(),
+            &sheets,
+            scale,
+            options,
+            view,
+        )
     }
 
     /// Closes the window.

@@ -38,6 +38,8 @@ pub struct PlatformCapabilities {
     /// Empty means nothing can be dropped on this application. A file-drop target checks this
     /// before offering itself as one, rather than showing an affordance that can never fire.
     pub drop_mime_types: Vec<String>,
+    /// Whether arbitrary media types can be negotiated on incoming drops beyond a fixed list.
+    pub drop_mime: bool,
     /// Which clipboard representations can be read or written at all.
     ///
     /// Plain text is on every platform. The rest are not, and a paste command offering rich text
@@ -127,6 +129,7 @@ impl PlatformCapabilities {
             layer_surfaces: false,
             drag_source: false,
             drop_mime_types: Vec::new(),
+            drop_mime: false,
             clipboard_formats: vec![ClipboardFormat::Text],
             clipboard_primary_selection: false,
             clipboard_mime: false,

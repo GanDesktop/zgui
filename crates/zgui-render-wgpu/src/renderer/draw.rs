@@ -72,6 +72,25 @@ impl Renderer for WgpuRenderer {
         Some(self)
     }
 
+    fn read_rgba(&self) -> Option<zgui_render::RenderedPixels> {
+        let pixels = self.read_presented()?;
+        let size = pixels.size();
+        let bytes = if pixels.is_bgra() {
+            let mut rgba = pixels.bytes().to_vec();
+            for px in rgba.as_chunks_mut::<4>().0 {
+                px.swap(0, 2);
+            }
+            rgba
+        } else {
+            pixels.bytes().to_vec()
+        };
+        Some(zgui_render::RenderedPixels {
+            bytes,
+            size,
+            premultiplied: true,
+        })
+    }
+
     /// Yes: this renderer composes every frame into a target that outlives it, so the pixels a
     /// scroll moves are already here.
     fn shifts_composed_pixels(&self) -> bool {

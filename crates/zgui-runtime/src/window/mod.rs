@@ -7,7 +7,7 @@
 
 pub mod a11y;
 pub mod anim;
-mod brushes;
+pub(crate) mod brushes;
 mod budget;
 pub mod caret;
 mod clicks;
@@ -667,6 +667,14 @@ impl Window {
         let mut sheets = Vec::new();
         // The application's sheets first and this window's own after them, each in call order, so
         // a rule of equal weight in a later sheet wins.
+        handle.seed_sheets(
+            options
+                .stylesheets
+                .iter()
+                .chain(&options.window_stylesheets)
+                .cloned(),
+        );
+        handle.record_color_scheme(viewport.scheme);
         for css in options
             .stylesheets
             .iter()
@@ -682,6 +690,7 @@ impl Window {
         }
         let gate = Arc::clone(waker.gate());
         let scope = zgui_reactive::Mounted::new();
+        handle.attach_owner(scope.owner().clone());
         let host = scope.with(|| {
             Rc::new(RuntimeHost::new(
                 document_id,

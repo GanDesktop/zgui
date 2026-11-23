@@ -6,7 +6,7 @@ use zgui_vocab::{
     PointerEvent, Timestamp, WheelEvent,
 };
 
-use crate::surface::drag::DragEvent;
+use crate::surface::drag::{DragEvent, DragSourceEvent};
 use crate::theme::ColorScheme;
 
 /// Something that happened to a surface.
@@ -140,6 +140,8 @@ pub enum SurfaceEvent {
     Ime(ImeEvent),
     /// Content from outside the application was dragged over or dropped on the surface.
     Drag(DragEvent),
+    /// A native drag session started from this surface changed state.
+    DragSource(DragSourceEvent),
 }
 
 impl SurfaceEvent {
@@ -225,10 +227,22 @@ impl SurfaceEvent {
                 Some((state.event_kind(), Payload::Key(event.clone())))
             }
             Self::Ime(event) => Some((event.event_kind(), Payload::Ime(event.clone()))),
-            Self::Drag(DragEvent::Dropped { paths, position }) => Some((
+            Self::Drag(DragEvent::Dropped {
+                paths,
+                mime_types,
+                payload,
+                source_actions,
+                action,
+                position,
+                ..
+            }) => Some((
                 EventKind::Drop,
                 Payload::Drop(DropEvent {
                     paths: paths.clone(),
+                    mime_types: mime_types.clone(),
+                    payload: payload.clone(),
+                    source_actions: *source_actions,
+                    action: *action,
                     position: *position,
                 }),
             )),
@@ -287,7 +301,18 @@ mod tests {
     #[test]
     fn input_is_told_apart_from_everything_else() {
         assert!(pointer().is_input());
-        assert!(SurfaceEvent::Drag(DragEvent::Left).is_input());
+        assert!(
+            SurfaceEvent::Drag(DragEvent::Left {
+                offer: crate::DragOfferId::new(1),
+            })
+            .is_input()
+        );
+        assert!(
+            !SurfaceEvent::DragSource(crate::DragSourceEvent::Cancelled {
+                session: crate::DragSessionId::new(1),
+            })
+            .is_input()
+        );
         assert!(!SurfaceEvent::RedrawRequested.is_input());
         assert!(!SurfaceEvent::Occluded(true).is_input());
         assert!(!SurfaceEvent::ColorSchemeChanged(ColorScheme::Dark).is_input());
@@ -345,8 +370,14 @@ mod tests {
             },
             SurfaceEvent::Ime(ImeEvent::Commit("x".into())),
             SurfaceEvent::Drag(DragEvent::Dropped {
+                offer: crate::DragOfferId::new(1),
+                mime_types: vec!["text/uri-list".to_owned()],
+                source_actions: crate::DragActions::COPY,
+                action: Some(crate::DragAction::Copy),
                 paths: vec![std::path::PathBuf::from("/a")],
+                payload: None,
                 position: Point::new(CssPx(1.0), CssPx(1.0)),
+                handle: crate::DropHandle::noop(),
             }),
         ];
         for event in dispatchable {
@@ -393,12 +424,19 @@ mod tests {
         );
         assert!(
             SurfaceEvent::Drag(DragEvent::Moved {
-                position: Point::new(CssPx(0.0), CssPx(0.0))
+                offer: crate::DragOfferId::new(1),
+                position: Point::new(CssPx(0.0), CssPx(0.0)),
             })
             .to_dispatch()
             .is_none()
         );
-        assert!(SurfaceEvent::Drag(DragEvent::Left).to_dispatch().is_none());
+        assert!(
+            SurfaceEvent::Drag(DragEvent::Left {
+                offer: crate::DragOfferId::new(1),
+            })
+            .to_dispatch()
+            .is_none()
+        );
         assert!(SurfaceEvent::RedrawRequested.to_dispatch().is_none());
         assert!(SurfaceEvent::Occluded(true).to_dispatch().is_none());
     }

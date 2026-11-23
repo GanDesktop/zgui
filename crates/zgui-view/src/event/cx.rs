@@ -1,12 +1,13 @@
 //! What a listener is handed.
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::marker::PhantomData;
 use core::ops::Deref;
 
 use zgui_geom::{Device, DevicePx, Rect};
 use zgui_vocab::{
-    DefaultAction, EventKind, Modifiers, Payload, Phase, PointerSample, Propagation, Timestamp,
+    DefaultAction, DragDecision, DropHandle, EventKind, Modifiers, Payload, Phase, PointerSample,
+    Propagation, Timestamp,
 };
 
 use crate::event::sink::EventSink;
@@ -25,12 +26,23 @@ pub struct EventControl {
     default_action: Cell<DefaultAction>,
     /// Whether a handler activated the element itself, on the press.
     activation_claimed: Cell<bool>,
+    /// First drag-hover negotiation decision recorded by a handler on the path.
+    drag_decision: RefCell<Option<DragDecision>>,
+    /// One-shot drop completion handle available to at most one `drop` handler on the path.
+    drop_handle: RefCell<Option<DropHandle>>,
 }
 
 impl EventControl {
     /// A control nobody has said anything to yet.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attaches a one-shot [`DropHandle`] for a `drop` dispatch.
+    #[must_use]
+    pub fn with_drop_handle(self, handle: Option<DropHandle>) -> Self {
+        *self.drop_handle.borrow_mut() = handle;
+        self
     }
 
     /// How far the event should keep travelling.
@@ -46,6 +58,16 @@ impl EventControl {
     /// Whether a handler took the activation for itself, which the release must not repeat.
     pub fn activation_claimed(&self) -> bool {
         self.activation_claimed.get()
+    }
+
+    /// Takes the drag-hover negotiation decision recorded by the innermost handler, if any.
+    pub fn take_drag_decision(&self) -> Option<DragDecision> {
+        self.drag_decision.borrow_mut().take()
+    }
+
+    /// Takes the drop completion handle if no handler claimed it.
+    pub fn take_drop_handle(&self) -> Option<DropHandle> {
+        self.drop_handle.borrow_mut().take()
     }
 }
 
@@ -195,6 +217,36 @@ impl<'a, E: EventView> EventCx<'a, E> {
         self.control.default_action.set(DefaultAction::Prevented);
     }
 
+    /// Records this control's negotiation decision (`MIME` and actions) during `drag_enter` or
+    /// `drag_over`.
+    ///
+    /// The innermost handler that decides wins: if a descendant already recorded a decision
+    /// (including an explicit [`DragDecision::reject`]), ancestors cannot overwrite it.
+    pub fn accept_drag(&self, decision: DragDecision) {
+        let mut slot = self.control.drag_decision.borrow_mut();
+        if slot.is_some() {
+            return;
+        }
+        if decision.is_accepted() {
+            self.prevent_default();
+        }
+        *slot = Some(decision);
+    }
+
+    /// Whether an earlier handler on this dispatch path already recorded a [`DragDecision`].
+    pub fn drag_decision_claimed(&self) -> bool {
+        self.control.drag_decision.borrow().is_some()
+    }
+
+    /// Claims unique ownership of the [`DropHandle`] for a `drop` event.
+    ///
+    /// Returns `Some(handle)` to the first handler that claims it and `None` to any subsequent
+    /// handler along the bubble path. Call [`DropHandle::complete`] only once the drop operation
+    /// succeeds; dropping or rejecting the handle cancels the protocol transfer safely.
+    pub fn take_drop_handle(&self) -> Option<DropHandle> {
+        self.control.drop_handle.borrow_mut().take()
+    }
+
     /// Routes every subsequent pointer event to the current node until the button is released.
     pub fn capture_pointer(&mut self) {
         let node = self.current;
@@ -338,6 +390,48 @@ mod tests {
         // ... and re-types into the one the registration asked for, with no downcast.
         let typed = ev.retype::<crate::events::PointerDown>();
         assert_eq!(typed.position, pointer().position);
+    }
+
+    #[test]
+    fn innermost_drag_decision_and_single_drop_handle_claim_win() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use zgui_vocab::{DragAction, DragActions, DragDecision, DropEvent, DropHandle};
+
+        let payload = Payload::Drop(DropEvent::from_paths(
+            Vec::new(),
+            zgui_geom::Point::new(zgui_geom::CssPx(0.0), zgui_geom::CssPx(0.0)),
+        ));
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_flag = Arc::clone(&completed);
+        let control = EventControl::new().with_drop_handle(Some(DropHandle::new(move |ok| {
+            completed_flag.store(ok, Ordering::Relaxed);
+        })));
+        let mut sink = DiscardCommands;
+
+        let ev: EventCx<'_, events::DragOver> = EventCx::new(
+            events::DRAG_OVER.kind(),
+            node(),
+            node(),
+            Phase::Target,
+            Modifiers::NONE,
+            Timestamp::ORIGIN,
+            &payload,
+            &control,
+            &mut sink,
+        );
+        let inner =
+            DragDecision::accept("text/uri-list", DragActions::COPY, Some(DragAction::Copy));
+        let outer = DragDecision::accept("text/plain", DragActions::MOVE, Some(DragAction::Move));
+        ev.accept_drag(inner.clone());
+        ev.accept_drag(outer);
+        assert!(ev.drag_decision_claimed());
+        assert_eq!(control.take_drag_decision(), Some(inner));
+
+        let claimed = ev.take_drop_handle().expect("first claim succeeds");
+        assert!(ev.take_drop_handle().is_none(), "second claim gets None");
+        claimed.complete();
+        assert!(completed.load(Ordering::Relaxed));
     }
 
     #[test]

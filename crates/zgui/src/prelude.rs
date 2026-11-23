@@ -29,9 +29,9 @@ pub use crate::error::Error;
 /// another. Every operation on a window that has closed does nothing, as does every operation this
 /// desktop cannot carry out — so none of this needs a branch per platform.
 pub use zgui_runtime::windows::{
-    CloseGuard, FocusGuard, LayerOptions, PopupOptions, WindowHandle, WindowId, WindowOptions,
-    Windows, on_close_request, try_use_window, try_use_windows, use_input_region, use_window,
-    use_windows,
+    CloseGuard, DragSourceGuard, FocusGuard, LayerOptions, PopupOptions, RenderedView,
+    ViewSnapshotOptions, WindowHandle, WindowId, WindowOptions, Windows, on_close_request,
+    try_use_window, try_use_windows, use_input_region, use_window, use_windows,
 };
 
 /// The desktop's clipboards: what to copy onto, and what to read back.
@@ -62,8 +62,10 @@ pub use zgui_runtime::lock::{LockError, LockHandle, SessionLock};
 /// A pop-up's anchor point is [`zgui::platform::Anchor`](zgui_platform::Anchor), because the view
 /// layer has an `Anchor` of its own.
 pub use zgui_platform::{
-    CloseReason, ComposeAhead, Constrain, CursorStyle, Decorations, ExclusiveZone, FullscreenMode,
-    InputSerial, KeyboardInteractivity, ResizeEdge, TitleButtons, WindowIcon, WindowLevel,
+    CloseReason, ComposeAhead, Constrain, CursorStyle, Decorations, DragAction, DragActions,
+    DragDecision, DragIcon, DragMime, DragOfferId, DragSessionId, DragSourceEvent,
+    DragSourceRequest, DropHandle, ExclusiveZone, FullscreenMode, InputSerial,
+    KeyboardInteractivity, ResizeEdge, TitleButtons, WindowIcon, WindowLevel,
 };
 pub use zgui_runtime::{CloseResponse, ExitPolicy};
 

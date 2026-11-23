@@ -7,7 +7,7 @@ use zgui_render::{RenderTarget, Renderer};
 use zgui_render_wgpu::{
     CompositorGpuHint, GroupPrecision, PresentPacing, SharedGraphics, renderer::PrePresent,
 };
-use zgui_runtime::{AppError, RendererFactory};
+use zgui_runtime::{AppError, OffscreenRendererFactory, RendererFactory};
 
 /// The compositor notification belonging to `surface`, kept alive with it.
 fn pre_present(surface: &Arc<dyn Surface>) -> PrePresent {
@@ -74,12 +74,36 @@ fn pre_present_callback(notify: impl Fn(RenderTarget) + Send + Sync + 'static) -
 /// to the window, naming every one that was tried, and [`AppError::Platform`] when the window
 /// offers no handles a graphics API can draw into at all. Neither is answered with a renderer that
 /// draws nowhere: a window that opens and never paints looks like a program that has hung.
-pub(crate) fn factory(precision: Option<GroupPrecision>) -> RendererFactory {
+pub(crate) fn factories(
+    precision: Option<GroupPrecision>,
+) -> (RendererFactory, OffscreenRendererFactory) {
     let graphics = SharedGraphics::new();
     let precision = GroupPrecision::from_environment()
         .or(precision)
         .unwrap_or_default();
-    Box::new(move |surface, target| renderer(&graphics, surface, target, precision))
+    let surface_graphics = graphics.clone();
+    let surface_factory: RendererFactory =
+        Box::new(move |surface, target| renderer(&surface_graphics, surface, target, precision));
+    let offscreen_factory: OffscreenRendererFactory =
+        Box::new(move |target| offscreen_renderer(&graphics, target, precision));
+    (surface_factory, offscreen_factory)
+}
+
+/// Opens a translucent offscreen renderer on the shared graphics device for one-shot view
+/// snapshots such as drag icons.
+fn offscreen_renderer(
+    graphics: &SharedGraphics,
+    target: RenderTarget,
+    precision: GroupPrecision,
+) -> Result<Box<dyn Renderer>, AppError> {
+    let mut renderer = graphics.renderer_offscreen(
+        target,
+        zgui_render_wgpu::wgpu::TextureFormat::Rgba8Unorm,
+        false,
+    )?;
+    renderer.set_group_precision(precision);
+    zgui_render_vector_vello::attach(&mut renderer, target.size);
+    Ok(Box::new(renderer))
 }
 
 /// Opens a renderer for `surface` on the shared graphics.
@@ -159,6 +183,6 @@ mod tests {
         // Making the factory must not enumerate adapters: it is built while the application is
         // still being described, on a thread that may have no display connection yet, and the
         // device is opened by the first window instead.
-        let _factory = factory(None);
+        let _factories = factories(None);
     }
 }

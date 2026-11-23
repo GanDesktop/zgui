@@ -40,6 +40,7 @@ impl Window {
             }
         };
         drop(document);
+        self.handle.record_view_sheet(name, css);
         for report in diagnostics.iter() {
             tracing::warn!(
                 target: "zgui::css",
@@ -55,6 +56,7 @@ impl Window {
     /// A sheet is removed by letting go of its handle: the rule set reclaims every sheet whose
     /// handle has been dropped, which is what makes "forgot to remove it" impossible to write.
     pub(crate) fn remove_view_sheet(&mut self, name: &str) {
+        self.handle.remove_view_sheet(name);
         drop(self.view_sheets.remove(name));
     }
 }

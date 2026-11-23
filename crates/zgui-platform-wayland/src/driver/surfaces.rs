@@ -280,6 +280,8 @@ impl WaylandState {
             presentation: self.presentation.clone(),
             ping: self.live.waker.ping(),
             seat: std::sync::Arc::clone(&self.link),
+            selections: std::sync::Arc::clone(self.clipboard.selections()),
+            drag: std::sync::Arc::clone(&self.drag),
             shell: std::sync::Arc::clone(&self.xdg),
             importer: self.extras.importer.clone(),
             wm_dialog: self.extras.wm_dialog.clone(),

@@ -45,6 +45,10 @@ use crate::window::{Window, WindowContent};
 pub type RendererFactory =
     Box<dyn FnMut(&Arc<dyn Surface>, RenderTarget) -> Result<Box<dyn Renderer>, AppError>>;
 
+/// Builds an offscreen renderer for one-shot view snapshots (such as drag icons).
+pub type OffscreenRendererFactory =
+    Box<dyn FnMut(RenderTarget) -> Result<Box<dyn Renderer>, AppError>>;
+
 /// Builds the text engine a window shapes with.
 pub type TextFactory = Box<dyn FnMut() -> Box<dyn TextEngine>>;
 
@@ -134,6 +138,8 @@ pub struct App {
     options: WindowContent,
     /// What draws it.
     renderer: Option<RendererFactory>,
+    /// What draws offscreen view snapshots, when configured.
+    offscreen_renderer: Option<OffscreenRendererFactory>,
     /// What shapes its text.
     text: Option<TextFactory>,
     /// What answers the cascade's font-metric questions.
@@ -173,6 +179,7 @@ impl App {
             attributes: SurfaceAttributes::new("zgui"),
             options: WindowContent::default(),
             renderer: None,
+            offscreen_renderer: None,
             text: None,
             metrics: None,
             raster: None,
@@ -373,6 +380,13 @@ impl App {
         self
     }
 
+    /// Installs what builds offscreen renderers for one-shot view snapshots such as
+    /// [`WindowHandle::render_view`](crate::WindowHandle::render_view).
+    pub fn with_offscreen_renderer(mut self, factory: OffscreenRendererFactory) -> Self {
+        self.offscreen_renderer = Some(factory);
+        self
+    }
+
     /// Installs what builds the text engine each window shapes with.
     pub fn with_text_engine(mut self, factory: TextFactory) -> Self {
         self.text = Some(factory);
@@ -509,7 +523,7 @@ pub struct Runtime {
     /// The shortcuts of the menu's actions, shared with every window.
     menu_keys: crate::desktop::MenuKeys,
     /// The document identities, fresh and given back by closed windows.
-    documents: crate::documents::Documents,
+    documents: Rc<RefCell<crate::documents::Documents>>,
     /// What the desktop groups this application's windows under.
     ///
     /// Application-wide rather than per window: it is what a compositor matches window rules,
@@ -519,15 +533,17 @@ pub struct Runtime {
     /// What builds a renderer.
     renderer: RendererFactory,
     /// What builds a text engine.
-    text: TextFactory,
+    text: Rc<RefCell<TextFactory>>,
     /// What answers the cascade's font-metric questions.
-    metrics: MetricsFactory,
+    metrics: Rc<RefCell<MetricsFactory>>,
     /// What turns glyphs into pixels.
-    raster: RasterFactory,
+    raster: Rc<RefCell<RasterFactory>>,
     /// What builds an embed host, when the application brought one.
     embed: Option<EmbedFactory>,
     /// What builds a custom-element registry, when the application brought one.
-    custom: Option<CustomFactory>,
+    custom: Option<Rc<RefCell<CustomFactory>>>,
+    /// Shared factories handed to every window handle for offscreen view snapshots.
+    snapshot_env: Rc<crate::windows::snapshot::SnapshotEnv>,
     /// The windows that are open.
     windows: Vec<Window>,
     /// Whether a frame is in flight and what it owes.
@@ -706,6 +722,32 @@ impl Runtime {
                 ),
             });
         }
+        let documents = Rc::new(RefCell::new(crate::documents::Documents::default()));
+        let text: Rc<RefCell<TextFactory>> = Rc::new(RefCell::new(
+            app.text
+                .unwrap_or_else(|| Box::new(|| Box::new(NoText::new()))),
+        ));
+        let metrics: Rc<RefCell<MetricsFactory>> =
+            Rc::new(RefCell::new(app.metrics.unwrap_or_else(|| {
+                Box::new(|| Arc::new(zgui_text::FixedMetrics::new()))
+            })));
+        let raster: Rc<RefCell<RasterFactory>> = Rc::new(RefCell::new(
+            app.raster
+                .unwrap_or_else(|| Box::new(|| Arc::new(zgui_text::NoRaster))),
+        ));
+        let custom = app.custom.map(|factory| Rc::new(RefCell::new(factory)));
+        let offscreen_renderer = app
+            .offscreen_renderer
+            .map(|factory| Rc::new(RefCell::new(factory)));
+        let snapshot_env = Rc::new(crate::windows::snapshot::SnapshotEnv {
+            documents: Rc::clone(&documents),
+            offscreen_renderer,
+            text: Rc::clone(&text),
+            metrics: Rc::clone(&metrics),
+            raster: Rc::clone(&raster),
+            custom: custom.clone(),
+            clock: Rc::new(RefCell::new(None)),
+        });
         Self {
             app_options: app.options,
             live,
@@ -719,22 +761,17 @@ impl Runtime {
             hooks,
             menu,
             menu_keys: crate::desktop::MenuKeys::default(),
-            documents: crate::documents::Documents::default(),
+            documents,
             application_id: application_id.clone(),
             renderer: app.renderer.unwrap_or_else(|| {
                 Box::new(|_, _| Err(AppError::GpuUnavailable(zgui_render::GpuUnavailable::new())))
             }),
-            text: app
-                .text
-                .unwrap_or_else(|| Box::new(|| Box::new(NoText::new()))),
-            metrics: app
-                .metrics
-                .unwrap_or_else(|| Box::new(|| Arc::new(zgui_text::FixedMetrics::new()))),
-            raster: app
-                .raster
-                .unwrap_or_else(|| Box::new(|| Arc::new(zgui_text::NoRaster))),
+            text,
+            metrics,
+            raster,
             embed: app.embed,
-            custom: app.custom,
+            custom,
+            snapshot_env,
             windows: Vec::new(),
             gate: Arc::new(FrameGate::new()),
             timers: Rc::new(RefCell::new(Timers::new())),
@@ -780,7 +817,7 @@ impl Runtime {
     /// set a timer after its window closed, and that timer must not fire in the window that takes
     /// the identity over.
     fn allocate_document(&mut self) -> Result<zgui_dom::Document, AppError> {
-        let document = self.documents.allocate()?;
+        let document = self.documents.borrow_mut().allocate()?;
         if let Some(id) = zgui_view::DocumentId::new(document.store().document().get()) {
             self.timers.borrow_mut().forget(id);
         }
@@ -824,7 +861,9 @@ impl Runtime {
         let opened = self.open_live_window_into(cx, index, &mut document);
         // A window that failed to open gives its document's identity straight back.
         if let Some(unused) = document {
-            self.documents.give_back(&Rc::new(RefCell::new(unused)));
+            self.documents
+                .borrow_mut()
+                .give_back(&Rc::new(RefCell::new(unused)));
         }
         opened
     }
@@ -897,11 +936,12 @@ impl Runtime {
         let options = self
             .app_options
             .layered_with(&self.live[index].spec.options);
-        let text = (self.text)();
-        let raster = (self.raster)();
-        let metrics = (self.metrics)();
+        let text = (self.text.borrow_mut())();
+        let raster = (self.raster.borrow_mut())();
+        let metrics = (self.metrics.borrow_mut())();
         let timers = Rc::clone(&self.timers);
         let handle = self.live[index].handle.clone();
+        handle.attach_snapshot(Rc::clone(&self.snapshot_env));
         // A shell window, a pop-up and a lock window are given the keyboard by an edge of their
         // own, and one that takes no keyboard is never given it. Every other window is given it
         // as it opens.
@@ -963,8 +1003,8 @@ impl Runtime {
         if let Some(embed) = self.embed.as_mut() {
             window.install_embed_host(embed());
         }
-        if let Some(custom) = self.custom.as_mut() {
-            let (layout, paint) = custom(window.document());
+        if let Some(custom) = self.custom.as_ref() {
+            let (layout, paint) = (custom.borrow_mut())(window.document());
             window.install_custom_sources(layout, paint);
         }
         window.set_menu_keys(self.menu_keys.clone());
@@ -1271,7 +1311,7 @@ impl Runtime {
             let window = self.windows.remove(position);
             // The identity comes back once the document is dropped, which is here unless
             // something outside the window still holds it.
-            self.documents.give_back(window.document());
+            self.documents.borrow_mut().give_back(window.document());
             drop(window);
         }
         if let Some(live) = self
@@ -1334,7 +1374,9 @@ impl AppHandler for Runtime {
         // Installed before anything else: a clock read from two places is two clocks, and the
         // wake edge has to exist before the first effect is created or work that becomes ready
         // between frames is queued with nothing to ask for the frame that would poll it.
-        self.clock = Some(cx.clock());
+        let clock = cx.clock();
+        *self.snapshot_env.clock.borrow_mut() = Some(Arc::clone(&clock));
+        self.clock = Some(clock);
         let waker = Arc::new(RuntimeWaker::new(cx.waker(), Arc::clone(&self.gate)));
         zgui_reactive::set_frame_waker(Arc::clone(&waker) as Arc<dyn zgui_reactive::FrameWaker>);
         self.waker = Some(waker);

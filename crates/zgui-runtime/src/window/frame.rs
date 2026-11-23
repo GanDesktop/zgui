@@ -178,10 +178,12 @@ impl Window {
             }
             _ => true,
         };
-        // Focus is not input from a person, but what it does — ending a composition, announcing a
-        // settled value — runs handlers, and handlers run in a frame rather than where an event
-        // arrives. So it is queued with the input and drained with it.
-        if event.is_input() || (wants_a_frame && Self::surface_focus_of(&event).is_some()) {
+        // Focus and outgoing drag-source updates are not input from a person, but their callbacks
+        // run inside a frame with the window scope active rather than where an event arrives.
+        if event.is_input()
+            || matches!(event, zgui_platform::SurfaceEvent::DragSource(_))
+            || (wants_a_frame && Self::surface_focus_of(&event).is_some())
+        {
             // A move behind a move of the same pointer takes its place: a frame routes and
             // settles one move per pointer, and the folded positions ride along as samples for
             // the handler that wants the path rather than the destination.
@@ -247,7 +249,10 @@ impl Window {
     fn settle_retry(&mut self, outcome: FrameOutcome, now: Instant) {
         // The renderer will repaint its entire target after a surface or device recovery.
         // Emit the complete display list before that draw, even if only a hover changed.
-        if matches!(outcome, FrameOutcome::Skipped(SkipReason::Outdated) | FrameOutcome::Recovered) {
+        if matches!(
+            outcome,
+            FrameOutcome::Skipped(SkipReason::Outdated) | FrameOutcome::Recovered
+        ) {
             self.damage = DamageSet::full();
         }
         self.retry_after = match outcome {

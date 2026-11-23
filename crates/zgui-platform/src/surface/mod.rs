@@ -18,7 +18,10 @@ pub use crate::surface::attributes::{SurfaceAttributes, TitleButtons};
 pub use crate::surface::chrome::{
     CursorStyle, DecorationSource, Decorations, FullscreenMode, ResizeEdge, WindowLevel,
 };
-pub use crate::surface::drag::DragEvent;
+pub use crate::surface::drag::{
+    DragAction, DragActions, DragDecision, DragEvent, DragIcon, DragMime, DragOfferId,
+    DragSessionId, DragSourceEvent, DragSourceRequest, DropHandle,
+};
 pub use crate::surface::event::{CloseReason, SurfaceEvent};
 pub use crate::surface::gpu::{CompositorGpuHint, GpuSurface};
 pub use crate::surface::icon::{BadIcon, WindowIcon};
@@ -354,6 +357,31 @@ pub trait Surface: Send + Sync + 'static {
     fn begin_resize_drag(&self, edge: ResizeEdge) -> Result<(), Unsupported> {
         let _ = edge;
         Err(Unsupported)
+    }
+
+    /// Starts an outgoing native drag-and-drop session originating from this surface.
+    ///
+    /// The platform takes ownership of pointer tracking until the drag finishes or is cancelled,
+    /// reporting lifecycle updates through [`SurfaceEvent::DragSource`]. Check
+    /// [`PlatformCapabilities::drag_source`](crate::PlatformCapabilities::drag_source) before
+    /// advertising native cross-window dragging.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError::Unsupported`] when this backend or desktop cannot initiate native
+    /// drags, or [`PlatformError::Backend`] when the request has no MIME entries, no allowed
+    /// actions, or no active pointer or touch press on this surface.
+    fn start_drag(&self, request: DragSourceRequest) -> Result<DragSessionId, PlatformError> {
+        let _ = request;
+        Err(Unsupported.into())
+    }
+
+    /// Reports the hovered control's negotiation decision (`MIME` and allowed/preferred actions)
+    /// for an external drag offer over this surface.
+    ///
+    /// A backend with no interactive drop negotiation (such as winit) ignores this request.
+    fn respond_drag_offer(&self, offer: DragOfferId, decision: DragDecision) {
+        let _ = (offer, decision);
     }
 
     /// Sets what the pointer looks like over this surface.

@@ -2,6 +2,7 @@
 
 use zgui_atlas::TextureSink;
 use zgui_bits::DamageSet;
+use zgui_geom::{Device, Size};
 use zgui_scene::Scene;
 
 use crate::capabilities::RenderCapabilities;
@@ -12,6 +13,20 @@ use crate::shift::ScrollShift;
 use crate::target::RenderTarget;
 use crate::texture::{ExternalTexture, TextureHandle};
 use crate::vector::VectorStatus;
+
+/// Tightly packed RGBA8 pixels read back from an offscreen renderer target.
+///
+/// Returned by [`Renderer::read_rgba`] for offscreen renderers (for example when rasterising a
+/// view into a window icon or drag icon).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderedPixels {
+    /// Row-major `RGBA8` bytes, four bytes per pixel.
+    pub bytes: Vec<u8>,
+    /// Extent of the read-back image, in device pixels.
+    pub size: Size<i32, Device>,
+    /// Whether the red, green and blue channels are premultiplied by alpha.
+    pub premultiplied: bool,
+}
 
 /// Something that can put a display list on a screen.
 ///
@@ -202,6 +217,15 @@ pub trait Renderer {
     /// renderer through [`Window::renderer`](https://docs.rs/zgui) with this. The same rule
     /// applies: a wrapper forwards it, or answers with itself when it is the type being asked for.
     fn as_any(&self) -> Option<&dyn core::any::Any> {
+        None
+    }
+
+    /// Reads back the last presented offscreen frame as tightly packed `RGBA8` pixels.
+    ///
+    /// Window surfaces return `None` because the compositor owns presented buffers. Offscreen
+    /// renderers override this so the runtime can snapshot a view into an icon or drag preview
+    /// without naming a graphics backend.
+    fn read_rgba(&self) -> Option<RenderedPixels> {
         None
     }
 }

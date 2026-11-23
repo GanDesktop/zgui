@@ -98,7 +98,7 @@ pub struct WaylandState {
     /// The desktop's clipboards.
     pub(crate) clipboard: WaylandClipboard,
     /// What is being dragged over a window, while something is.
-    pub(crate) drag: Drag,
+    pub(crate) drag: Arc<Drag>,
     /// The input method, and what it has been told.
     pub(crate) ime: Ime,
     /// How a window asks the desktop to bring it forward.
@@ -199,7 +199,7 @@ impl WaylandState {
             grabs,
             locks,
             clipboard: WaylandClipboard::default(),
-            drag: Drag::default(),
+            drag: Arc::new(Drag::default()),
             ime: Ime::default(),
             activation,
             wanted: std::collections::HashMap::new(),
@@ -217,6 +217,13 @@ impl WaylandState {
         state.clipboard.selections().attach(
             state.conn.clone(),
             qh,
+            Arc::clone(&waker) as Arc<dyn zgui_platform::Waker>,
+            state.compositor.clone(),
+            state.shm.wl_shm().clone(),
+            state.extras.viewporter.clone(),
+        );
+        state.drag.attach(
+            state.conn.clone(),
             Arc::clone(&waker) as Arc<dyn zgui_platform::Waker>,
         );
         // The preference lives on the session bus, outside the protocol. It is watched from here
@@ -243,59 +250,9 @@ impl WaylandState {
         Ok(state)
     }
 
-    /// Starts reading the paths of a drag that has just arrived.
-    ///
-    /// On a thread, for the reason every transfer here is: the other end is another process.
-    pub(crate) fn start_drag_read(&mut self) {
-        let Some(offer) = self.drag.to_read() else {
-            return;
-        };
-        let has_files = offer.with_mime_types(crate::clipboard::mime::has_files);
-        if !has_files {
-            return;
-        }
-        // Accepted before it is asked for, which the protocol requires and which is also what
-        // tells the source this window is a target at all.
-        offer.accept_mime_type(
-            offer.serial,
-            Some(crate::clipboard::mime::URI_LIST.to_owned()),
-        );
-        // The source actions arrive before the offer becomes a drag offer, so the toolkit never
-        // passes them to `source_actions`. Without an action set here, the compositor cancels the
-        // drop.
-        let taken = crate::driver::data::copy_only(offer.source_actions);
-        offer.set_actions(taken, taken);
-        let Ok(reader) = offer.receive(crate::clipboard::mime::URI_LIST.to_owned()) else {
-            return;
-        };
-        let _ = self.conn.flush();
-        let answers = self.drag.answers();
-        let waker = Arc::clone(&self.live.waker);
-        let _ = std::thread::Builder::new()
-            .name("zgui-drop".to_owned())
-            .spawn(move || {
-                let paths = crate::clipboard::pipe::read(reader, crate::clipboard::pipe::PATIENCE)
-                    .map(|bytes| crate::input::dnd::paths(&bytes))
-                    .unwrap_or_default();
-                *answers.lock().unwrap_or_else(|held| held.into_inner()) = Some(paths);
-                // The loop is parked on the socket and the answer arrived on a pipe, so it has to
-                // be told. What it does with the wake is drain the answer and report the drag.
-                zgui_platform::Waker::wake(waker.as_ref(), zgui_platform::WakeReason::AppWork);
-            });
-    }
-
-    /// Reports a drag whose paths have just arrived, if one was waiting for them.
+    /// Reports any dropped drags whose pipe transfers just finished on a worker thread.
     pub(crate) fn drag_read_finished(&mut self) {
-        let paths = self
-            .drag
-            .answers()
-            .lock()
-            .unwrap_or_else(|held| held.into_inner())
-            .clone();
-        let Some(paths) = paths else {
-            return;
-        };
-        if let Some((id, event)) = self.drag.read_finished(paths) {
+        for (id, event) in self.drag.take_completed_drops() {
             self.report(id, zgui_platform::SurfaceEvent::Drag(event));
         }
     }

@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use accesskit::TreeUpdate;
 use zgui_geom::{Css, CssPx, Device, DevicePx, Edges, Rect, Size};
 use zgui_platform::{
-    CursorStyle, DecorationSource, Decorations, FullscreenMode, InputSerial, LayerPatch,
-    LayerPlacement, PopupPlacement, Surface, SurfaceAttributes, SurfaceId, SurfaceRole, TextInput,
-    Unsupported,
+    CursorStyle, DecorationSource, Decorations, DragDecision, DragOfferId, FullscreenMode,
+    InputSerial, LayerPatch, LayerPlacement, PopupPlacement, Surface, SurfaceAttributes, SurfaceId,
+    SurfaceRole, TextInput, Unsupported,
 };
 
 /// How many accessibility nodes the surface keeps across the updates it retains.
@@ -116,6 +116,8 @@ pub struct OffscreenSurface {
     input_region_log: Mutex<Vec<Region>>,
     /// Every opaque region the surface was given, in order.
     opaque_region_log: Mutex<Vec<Region>>,
+    /// Every external drag negotiation decision returned to this surface, in order.
+    drag_response_log: Mutex<Vec<(DragOfferId, DragDecision)>>,
     /// Whether the surface has been shown.
     visible: AtomicBool,
     /// Whether the surface was last asked to be maximised.
@@ -162,6 +164,7 @@ impl OffscreenSurface {
             layer_log: Mutex::new(Vec::new()),
             input_region_log: Mutex::new(Vec::new()),
             opaque_region_log: Mutex::new(Vec::new()),
+            drag_response_log: Mutex::new(Vec::new()),
             visible: AtomicBool::new(false),
             maximized: AtomicBool::new(false),
             fullscreen: Mutex::new(None),
@@ -173,6 +176,16 @@ impl OffscreenSurface {
             requested_attributes: Mutex::new(SurfaceAttributes::default()),
             input_serial: Mutex::new(None),
         }
+    }
+
+    /// Drains every drag-offer negotiation decision sent to this surface.
+    pub fn take_drag_responses(&self) -> Vec<(DragOfferId, DragDecision)> {
+        std::mem::take(
+            &mut *self
+                .drag_response_log
+                .lock()
+                .expect("the log is not poisoned"),
+        )
     }
 
     /// Sets the token [`Surface::input_serial`] answers with, as a press on a real desktop would.
@@ -547,6 +560,13 @@ impl Surface for OffscreenSurface {
             .lock()
             .expect("the log is not poisoned")
             .push(cursor);
+    }
+
+    fn respond_drag_offer(&self, offer: DragOfferId, decision: DragDecision) {
+        self.drag_response_log
+            .lock()
+            .expect("the log is not poisoned")
+            .push((offer, decision));
     }
 
     fn set_layer_placement(&self, patch: &LayerPatch) -> Result<(), Unsupported> {

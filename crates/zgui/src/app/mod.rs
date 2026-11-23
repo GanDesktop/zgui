@@ -162,6 +162,8 @@ pub struct App {
     fonts: std::cell::OnceCell<Fonts>,
     /// What draws its windows, when it is not this machine's own graphics device.
     renderer: Option<zgui_runtime::RendererFactory>,
+    /// What draws offscreen view snapshots, when overridden by the caller.
+    offscreen_renderer: Option<zgui_runtime::OffscreenRendererFactory>,
     /// How precisely the default renderer holds a plain group, when the application set it.
     group_precision: Option<crate::GroupPrecision>,
     /// The application's own context setup, held until the faces are known.
@@ -192,6 +194,7 @@ impl App {
             inner: zgui_runtime::App::new(),
             fonts: std::cell::OnceCell::new(),
             renderer: None,
+            offscreen_renderer: None,
             group_precision: None,
             context: None,
         }
@@ -538,6 +541,17 @@ impl App {
         self
     }
 
+    /// Draws one-shot offscreen view snapshots (see
+    /// [`WindowHandle::render_view`](zgui_runtime::WindowHandle::render_view)) through `factory`
+    /// rather than the default shared graphics device.
+    pub fn with_offscreen_renderer(
+        mut self,
+        factory: zgui_runtime::OffscreenRendererFactory,
+    ) -> Self {
+        self.offscreen_renderer = Some(factory);
+        self
+    }
+
     /// Sets how precisely the default renderer holds a plain group of content.
     ///
     /// The default is [`GroupPrecision::Compact`](crate::GroupPrecision::Compact), which holds a
@@ -681,15 +695,20 @@ impl App {
         let fonts = self.fonts.into_inner().unwrap_or_else(Fonts::system);
         let shaping = fonts.clone();
         let group_precision = self.group_precision;
-        let renderer = self
-            .renderer
-            .unwrap_or_else(|| graphics::factory(group_precision));
+        let (renderer, default_offscreen) = match self.renderer {
+            Some(custom) => (custom, None),
+            None => {
+                let (surface_factory, offscreen_factory) = graphics::factories(group_precision);
+                (surface_factory, Some(offscreen_factory))
+            }
+        };
+        let offscreen_renderer = self.offscreen_renderer.or(default_offscreen);
         // The faces are provided above every window, so a component that shapes its own text
         // reaches the same collection the frame does. The application's own setup runs after, and
         // therefore resolves them like any other context.
         let context_fonts = fonts.clone();
         let setup = self.context;
-        let runtime = self
+        let mut inner = self
             .inner
             .with_context(move || {
                 zgui_reactive::provide_context(context_fonts);
@@ -697,7 +716,11 @@ impl App {
                     setup();
                 }
             })
-            .with_renderer(renderer)
+            .with_renderer(renderer);
+        if let Some(offscreen) = offscreen_renderer {
+            inner = inner.with_offscreen_renderer(offscreen);
+        }
+        let runtime = inner
             .with_metrics(Box::new({
                 let fonts = fonts.clone();
                 move || fonts.metrics()

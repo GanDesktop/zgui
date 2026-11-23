@@ -40,16 +40,20 @@ const BTN_LEFT: u32 = 0x110;
 const EXTENT: u32 = 1000;
 
 /// What the source was told about its drag.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Outcome {
     /// Whether the content was asked for.
     pub(crate) sent: bool,
+    /// Media types requested by the destination in order.
+    pub(crate) sent_mimes: Vec<String>,
     /// Whether the compositor performed the drop.
     pub(crate) performed: bool,
     /// Whether the destination finished the drop.
     pub(crate) finished: bool,
     /// Whether the compositor cancelled the drag before a drop.
     pub(crate) cancelled: bool,
+    /// Whether the destination rejected/destroyed the offer after drop without calling `finish`.
+    pub(crate) rejected: bool,
     /// The action the compositor chose last.
     pub(crate) action: Option<DndAction>,
     /// Whether the compositor chose an action other than none at any time.
@@ -58,8 +62,8 @@ pub(crate) struct Outcome {
 
 /// The client's state, as the compositor's events leave it.
 struct Source {
-    /// The file list the drag carries.
-    payload: &'static str,
+    /// Offered payloads keyed by advertised MIME name.
+    entries: Vec<(String, Vec<u8>)>,
     /// The configure to acknowledge, with the size it asks for.
     configure: Option<(u32, (i32, i32))>,
     /// The size the toplevel was given.
@@ -80,6 +84,12 @@ struct Source {
 /// Blocks until the compositor ended the drag or the patience ran out. Answers with the reason
 /// when this session cannot start a drag at all. The caller skips the property then.
 pub(crate) fn drag(to: (u32, u32), mime: &str, payload: &'static str) -> Result<Outcome, String> {
+    drag_entries(to, &[(mime, payload.as_bytes())])
+}
+
+/// Carries a multi-MIME drag of `entries` from a window of its own to `to`, in thousandths of the
+/// output.
+pub(crate) fn drag_entries(to: (u32, u32), entries: &[(&str, &[u8])]) -> Result<Outcome, String> {
     let conn = Connection::connect_to_env().map_err(|error| error.to_string())?;
     let (globals, mut queue) =
         registry_queue_init::<Source>(&conn).map_err(|error| error.to_string())?;
@@ -100,7 +110,10 @@ pub(crate) fn drag(to: (u32, u32), mime: &str, payload: &'static str) -> Result<
         .map_err(bind_error("virtual pointer manager"))?;
 
     let mut state = Source {
-        payload,
+        entries: entries
+            .iter()
+            .map(|(mime, bytes)| ((*mime).to_owned(), (*bytes).to_vec()))
+            .collect(),
         configure: None,
         size: (0, 0),
         pointer: false,
@@ -184,7 +197,9 @@ pub(crate) fn drag(to: (u32, u32), mime: &str, payload: &'static str) -> Result<
         return Err("the press on the source window never arrived".to_owned());
     };
     let source = devices.create_data_source(&qh, ());
-    source.offer(mime.to_owned());
+    for (mime, _) in entries {
+        source.offer((*mime).to_owned());
+    }
     source.set_actions(DndAction::Copy | DndAction::Move);
     device.start_drag(Some(&source), &surface, None, press);
     let _ = queue.roundtrip(&mut state);
@@ -215,7 +230,9 @@ pub(crate) fn drag(to: (u32, u32), mime: &str, payload: &'static str) -> Result<
     });
 
     let deadline = Instant::now() + Duration::from_secs(3);
-    while !(state.outcome.finished || state.outcome.cancelled) && Instant::now() < deadline {
+    while !(state.outcome.finished || state.outcome.cancelled || state.outcome.rejected)
+        && Instant::now() < deadline
+    {
         let _ = queue.roundtrip(&mut state);
         std::thread::sleep(Duration::from_millis(30));
     }
@@ -389,17 +406,28 @@ impl Dispatch<WlDataSource, ()> for Source {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            wl_data_source::Event::Send { fd, .. } => {
+            wl_data_source::Event::Send { mime_type, fd } => {
                 let mut pipe = std::fs::File::from(fd);
-                let _ = pipe.write_all(state.payload.as_bytes());
+                if let Some((_, bytes)) = state
+                    .entries
+                    .iter()
+                    .find(|(offered, _)| offered.eq_ignore_ascii_case(&mime_type))
+                {
+                    let _ = pipe.write_all(bytes);
+                }
                 state.outcome.sent = true;
+                state.outcome.sent_mimes.push(mime_type);
             }
             wl_data_source::Event::DndDropPerformed => state.outcome.performed = true,
             wl_data_source::Event::DndFinished => state.outcome.finished = true,
-            // A compositor can also cancel a source after its drop finished, when the offer is
-            // destroyed. Only a cancel before the drop ends the drag.
+            // A cancel before drop means the drag was aborted; a cancel after drop without
+            // `dnd_finished` means the destination rejected/abandoned the drop.
             wl_data_source::Event::Cancelled => {
-                state.outcome.cancelled |= !state.outcome.performed;
+                if !state.outcome.performed {
+                    state.outcome.cancelled = true;
+                } else if !state.outcome.finished {
+                    state.outcome.rejected = true;
+                }
             }
             wl_data_source::Event::Action {
                 dnd_action: WEnum::Value(action),

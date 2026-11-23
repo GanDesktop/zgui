@@ -4,22 +4,29 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
+use smithay_client_toolkit::compositor::CompositorState;
 use smithay_client_toolkit::data_device_manager::DataDeviceManagerState;
 use smithay_client_toolkit::data_device_manager::data_device::DataDevice;
-use smithay_client_toolkit::data_device_manager::data_source::CopyPasteSource;
+use smithay_client_toolkit::data_device_manager::data_source::{CopyPasteSource, DragSource};
 use smithay_client_toolkit::data_device_manager::{ReadPipe, WritePipe};
 use smithay_client_toolkit::primary_selection::PrimarySelectionManagerState;
 use smithay_client_toolkit::primary_selection::device::PrimarySelectionDevice;
 use smithay_client_toolkit::primary_selection::selection::PrimarySelectionSource;
 use smithay_client_toolkit::reexports::client::Connection;
 use smithay_client_toolkit::reexports::client::QueueHandle;
+use smithay_client_toolkit::reexports::client::protocol::wl_data_device_manager::DndAction;
 use smithay_client_toolkit::reexports::client::protocol::wl_data_source::WlDataSource;
+use smithay_client_toolkit::reexports::client::protocol::wl_shm::WlShm;
+use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::protocols::wp::primary_selection::zv1::client::zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1;
+use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 use zgui_platform::{
     ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardMime,
-    ClipboardMimeOffer, ClipboardSerial, Waker,
+    ClipboardMimeOffer, ClipboardSerial, DragAction, DragActions, DragSessionId, DragSourceEvent,
+    DragSourceRequest, PlatformError, SurfaceId, Unsupported, Waker,
 };
 
+use crate::clipboard::drag_icon::OutgoingDragIcon;
 use crate::clipboard::{deliver, deliver_mime, mime, pipe};
 use crate::driver::WaylandState;
 
@@ -40,6 +47,12 @@ struct Inner {
     conn: Option<Connection>,
     /// The queue the sources this application makes are dispatched on.
     qh: Option<QueueHandle<WaylandState>>,
+    /// The compositor used to create optional drag-icon `wl_surface`s.
+    compositor: Option<CompositorState>,
+    /// Shared memory global backing drag-icon pixel buffers.
+    shm: Option<WlShm>,
+    /// Optional `wp_viewporter` used when a scaled drag icon has non-divisible buffer dimensions.
+    viewporter: Option<WpViewporter>,
     /// Where an answer to a read is delivered.
     waker: Option<Arc<dyn Waker>>,
     /// The standard clipboard's device and manager.
@@ -56,6 +69,29 @@ struct Inner {
     awaiting_own_selection: [bool; 2],
     /// What this application has put on each clipboard.
     held: [Option<Held>; 2],
+    /// Monotonic identifier counter for outgoing native drag sessions.
+    next_drag_session: u64,
+    /// Active outgoing drag session started from one of this application's surfaces.
+    ///
+    /// Kept strictly separate from [`Self::held`] so dragging leaves both clipboards untouched.
+    outgoing_drag: Option<OutgoingDrag>,
+}
+
+/// An outgoing native drag session owned by this client until finished or cancelled.
+#[derive(Debug)]
+struct OutgoingDrag {
+    /// Session identifier reported back to the originating surface.
+    session: DragSessionId,
+    /// Surface that initiated the drag.
+    origin: SurfaceId,
+    /// Offered payloads keyed by advertised media type.
+    entries: BTreeMap<String, Vec<u8>>,
+    /// The Wayland drag source, kept alive until `dnd_finished`, `cancelled`, or replacement.
+    source: DragSource,
+    /// Optional drag-icon surface and backing SHM buffer, kept alive for the drag's lifetime.
+    _icon: Option<OutgoingDragIcon>,
+    /// Last action settled by the compositor for this drag.
+    selected_action: Option<DragAction>,
 }
 
 /// The ordinary clipboard's objects.
@@ -261,17 +297,23 @@ impl core::fmt::Debug for Inner {
 }
 
 impl Selections {
-    /// Records the connection and the queue everything is made on.
+    /// Records the connection, queue, waker, and globals needed to create drag-icon surfaces.
     pub(crate) fn attach(
         &self,
         conn: Connection,
         qh: QueueHandle<WaylandState>,
         waker: Arc<dyn Waker>,
+        compositor: CompositorState,
+        shm: WlShm,
+        viewporter: Option<WpViewporter>,
     ) {
         let mut inner = self.lock();
         inner.conn = Some(conn);
         inner.qh = Some(qh);
         inner.waker = Some(waker);
+        inner.compositor = Some(compositor);
+        inner.shm = Some(shm);
+        inner.viewporter = viewporter;
     }
 
     /// Records this seat's devices.
@@ -443,7 +485,7 @@ impl Selections {
                 .then(|| lookup_entry(&held.entries, mime).map(<[u8]>::to_vec))
                 .flatten()
         });
-        serve_bytes(bytes, destination);
+        serve_bytes("zgui-clipboard-write", bytes, destination);
     }
 
     /// The same, for the selection clipboard.
@@ -458,7 +500,253 @@ impl Selections {
                 .then(|| lookup_entry(&held.entries, mime).map(<[u8]>::to_vec))
                 .flatten()
         });
-        serve_bytes(bytes, destination);
+        serve_bytes("zgui-clipboard-write", bytes, destination);
+    }
+
+    /// Starts an outgoing native drag session from `origin` with `request`.
+    ///
+    /// Creates a fresh `wl_data_source` independent of the clipboard selection slots and flushes
+    /// `wl_data_device.start_drag` immediately so the compositor observes it while the initiating
+    /// implicit grab is still held.
+    pub(crate) fn start_drag(
+        &self,
+        origin: SurfaceId,
+        wl_surface: &WlSurface,
+        serial: u32,
+        request: DragSourceRequest,
+    ) -> Result<DragSessionId, PlatformError> {
+        if request.entries.is_empty() {
+            return Err(PlatformError::Backend(
+                "a drag source must offer at least one MIME entry".to_owned(),
+            ));
+        }
+        if request
+            .entries
+            .iter()
+            .any(|entry| entry.mime_type.is_empty())
+        {
+            return Err(PlatformError::Backend(
+                "a drag source MIME type must not be empty".to_owned(),
+            ));
+        }
+        let dnd_actions = to_wayland_actions(request.actions);
+        if dnd_actions == DndAction::None {
+            return Err(PlatformError::Backend(
+                "a drag source must allow at least one Wayland-supported action (Copy or Move)"
+                    .to_owned(),
+            ));
+        }
+
+        let mut inner = self.lock();
+        let qh = inner
+            .qh
+            .clone()
+            .ok_or_else(|| PlatformError::Backend("the loop has not started".to_owned()))?;
+        if inner.standard.is_none() {
+            return Err(Unsupported.into());
+        }
+
+        let icon = if let Some(icon_request) = request.icon.as_ref() {
+            match (inner.compositor.as_ref(), inner.shm.as_ref()) {
+                (Some(compositor), Some(shm)) => match OutgoingDragIcon::prepare(
+                    compositor,
+                    shm,
+                    inner.viewporter.as_ref(),
+                    &qh,
+                    icon_request,
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to prepare Wayland drag icon; starting drag without icon");
+                        None
+                    }
+                },
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let mut map = BTreeMap::new();
+        let mut offered_mimes = Vec::with_capacity(request.entries.len());
+        for entry in request.entries {
+            if !map.contains_key(&entry.mime_type) {
+                offered_mimes.push(entry.mime_type.clone());
+            }
+            map.insert(entry.mime_type, entry.bytes);
+        }
+
+        // Drop any stale outgoing drag before creating and starting the new one so destruction
+        // precedes the new `start_drag` in wire order, while leaving `held` clipboards intact.
+        inner.outgoing_drag = None;
+        let standard = inner
+            .standard
+            .as_ref()
+            .expect("standard data device was checked above");
+        let source = standard
+            .manager
+            .create_drag_and_drop_source(&qh, offered_mimes, dnd_actions);
+        source.start_drag(
+            &standard.device,
+            wl_surface,
+            icon.as_ref().map(OutgoingDragIcon::wl_surface),
+            serial,
+        );
+        if let Some(icon) = icon.as_ref() {
+            icon.commit();
+        }
+
+        inner.next_drag_session = inner.next_drag_session.saturating_add(1);
+        let session = DragSessionId::new(inner.next_drag_session);
+        inner.outgoing_drag = Some(OutgoingDrag {
+            session,
+            origin,
+            entries: map,
+            source,
+            _icon: icon,
+            selected_action: None,
+        });
+        if let Some(conn) = &inner.conn {
+            let _ = conn.flush();
+        }
+        Ok(session)
+    }
+
+    /// Serves a `send` request when `source` belongs to the active outgoing drag.
+    ///
+    /// Returns `Err(destination)` untouched when `source` is not the outgoing drag so the caller
+    /// can route it to the clipboard instead.
+    pub(crate) fn serve_drag(
+        &self,
+        source: &WlDataSource,
+        mime: &str,
+        destination: WritePipe,
+    ) -> Result<(), WritePipe> {
+        let bytes = {
+            let inner = self.lock();
+            let Some(drag) = inner
+                .outgoing_drag
+                .as_ref()
+                .filter(|drag| drag.source.inner() == source)
+            else {
+                return Err(destination);
+            };
+            lookup_entry(&drag.entries, mime).map(<[u8]>::to_vec)
+        };
+        serve_bytes("zgui-drag-write", bytes, destination);
+        Ok(())
+    }
+
+    /// Records the destination's accepted MIME type for the active outgoing drag.
+    pub(crate) fn drag_target(
+        &self,
+        source: &WlDataSource,
+        mime_type: Option<String>,
+    ) -> Option<(SurfaceId, DragSourceEvent)> {
+        let inner = self.lock();
+        let drag = inner
+            .outgoing_drag
+            .as_ref()
+            .filter(|drag| drag.source.inner() == source)?;
+        Some((
+            drag.origin,
+            DragSourceEvent::TargetMime {
+                session: drag.session,
+                mime_type,
+            },
+        ))
+    }
+
+    /// Records the compositor's negotiated action for the active outgoing drag.
+    pub(crate) fn drag_action(
+        &self,
+        source: &WlDataSource,
+        action: DndAction,
+    ) -> Option<(SurfaceId, DragSourceEvent)> {
+        let mut inner = self.lock();
+        let drag = inner
+            .outgoing_drag
+            .as_mut()
+            .filter(|drag| drag.source.inner() == source)?;
+        let mapped = from_wayland_action(action);
+        drag.selected_action = mapped;
+        Some((
+            drag.origin,
+            DragSourceEvent::ActionChanged {
+                session: drag.session,
+                action: mapped,
+            },
+        ))
+    }
+
+    /// Records that the pointer was released over an accepting target.
+    pub(crate) fn drag_dropped(
+        &self,
+        source: &WlDataSource,
+    ) -> Option<(SurfaceId, DragSourceEvent)> {
+        let inner = self.lock();
+        let drag = inner
+            .outgoing_drag
+            .as_ref()
+            .filter(|drag| drag.source.inner() == source)?;
+        Some((
+            drag.origin,
+            DragSourceEvent::Dropped {
+                session: drag.session,
+                action: drag.selected_action,
+            },
+        ))
+    }
+
+    /// Retires the active outgoing drag once the destination finishes the transfer.
+    pub(crate) fn drag_finished(
+        &self,
+        source: &WlDataSource,
+    ) -> Option<(SurfaceId, DragSourceEvent)> {
+        let mut inner = self.lock();
+        if !inner
+            .outgoing_drag
+            .as_ref()
+            .is_some_and(|drag| drag.source.inner() == source)
+        {
+            return None;
+        }
+        let drag = inner.outgoing_drag.take()?;
+        if let Some(conn) = &inner.conn {
+            let _ = conn.flush();
+        }
+        Some((
+            drag.origin,
+            DragSourceEvent::Finished {
+                session: drag.session,
+                action: drag.selected_action,
+            },
+        ))
+    }
+
+    /// Retires the active outgoing drag when cancelled, leaving clipboard ownership intact.
+    pub(crate) fn drag_cancelled(
+        &self,
+        source: &WlDataSource,
+    ) -> Option<(SurfaceId, DragSourceEvent)> {
+        let mut inner = self.lock();
+        if !inner
+            .outgoing_drag
+            .as_ref()
+            .is_some_and(|drag| drag.source.inner() == source)
+        {
+            return None;
+        }
+        let drag = inner.outgoing_drag.take()?;
+        if let Some(conn) = &inner.conn {
+            let _ = conn.flush();
+        }
+        Some((
+            drag.origin,
+            DragSourceEvent::Cancelled {
+                session: drag.session,
+            },
+        ))
     }
 
     /// Asks the owner of `kind` for `format`, answering with the pipe it will write into.
@@ -719,10 +1007,10 @@ fn lookup_entry<'a>(entries: &'a BTreeMap<String, Vec<u8>>, wanted: &str) -> Opt
         .map(Vec::as_slice)
 }
 
-/// Writes a held selection into `destination`, on a thread.
-fn serve_bytes(bytes: Option<Vec<u8>>, destination: WritePipe) {
+/// Writes a held selection or drag payload into `destination`, on a thread.
+fn serve_bytes(thread_name: &'static str, bytes: Option<Vec<u8>>, destination: WritePipe) {
     let _ = std::thread::Builder::new()
-        .name("zgui-clipboard-write".to_owned())
+        .name(thread_name.to_owned())
         .spawn(move || {
             // A destination asking for a selection this application no longer holds gets an empty
             // one: closing the pipe with nothing in it is how the protocol says "nothing here".
@@ -732,6 +1020,29 @@ fn serve_bytes(bytes: Option<Vec<u8>>, destination: WritePipe) {
                 pipe::PATIENCE,
             );
         });
+}
+
+/// Converts platform [`DragActions`] to core Wayland [`DndAction`] bits.
+fn to_wayland_actions(actions: DragActions) -> DndAction {
+    let mut out = DndAction::None;
+    if actions.contains(DragActions::COPY) {
+        out |= DndAction::Copy;
+    }
+    if actions.contains(DragActions::MOVE) {
+        out |= DndAction::Move;
+    }
+    out
+}
+
+/// Converts a single Wayland [`DndAction`] to a platform [`DragAction`].
+fn from_wayland_action(action: DndAction) -> Option<DragAction> {
+    if action == DndAction::Copy {
+        Some(DragAction::Copy)
+    } else if action == DndAction::Move {
+        Some(DragAction::Move)
+    } else {
+        None
+    }
 }
 
 /// Which slot a clipboard's state is kept in.
@@ -747,6 +1058,25 @@ mod tests {
     use super::{finish, index};
     use crate::clipboard::pipe::Failed;
     use zgui_platform::{ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind};
+
+    #[test]
+    fn drag_actions_map_between_platform_and_wayland() {
+        use super::{from_wayland_action, to_wayland_actions};
+        use smithay_client_toolkit::reexports::client::protocol::wl_data_device_manager::DndAction;
+        use zgui_platform::{DragAction, DragActions};
+
+        assert_eq!(to_wayland_actions(DragActions::NONE), DndAction::None);
+        assert_eq!(to_wayland_actions(DragActions::COPY), DndAction::Copy);
+        assert_eq!(
+            to_wayland_actions(DragActions::COPY | DragActions::MOVE),
+            DndAction::Copy | DndAction::Move
+        );
+        assert_eq!(to_wayland_actions(DragActions::LINK), DndAction::None);
+        assert_eq!(from_wayland_action(DndAction::Copy), Some(DragAction::Copy));
+        assert_eq!(from_wayland_action(DndAction::Move), Some(DragAction::Move));
+        assert_eq!(from_wayland_action(DndAction::None), None);
+        assert_eq!(from_wayland_action(DndAction::Ask), None);
+    }
 
     #[test]
     fn the_two_clipboards_are_kept_apart() {

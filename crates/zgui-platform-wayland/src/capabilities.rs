@@ -14,18 +14,18 @@ pub fn of(offered: Offered) -> PlatformCapabilities {
     capabilities.native_popup_surfaces = true;
     capabilities.window_controls = true;
     capabilities.layer_surfaces = offered.layer_shell;
-    // Receiving a drop is the data device's, so it arrives with the clipboard. What arrives is
-    // always paths: a drag of anything else carries something no file system can open, and this
-    // backend drops it rather than turning it into a name nothing can read.
+    // Receiving a drop uses `wl_data_device`, so it arrives alongside the clipboard. Controls can
+    // negotiate `text/uri-list` or arbitrary MIME types via `EventCx::accept_drag` and read
+    // additional MIME payloads from the live `DropHandle` before completing the drop.
     capabilities.drop_mime_types = if offered.clipboard {
         vec!["text/uri-list".to_owned()]
     } else {
         Vec::new()
     };
-    // Starting a drag towards another application is the other half of the same protocol and is
-    // not spoken yet. Declared absent rather than present-and-broken: a draggable control that
-    // offers itself and then never starts anything is worse than one that does not offer itself.
-    capabilities.drag_source = false;
+    capabilities.drop_mime = offered.clipboard;
+    // Starting an outgoing drag uses the same core `wl_data_device` global as clipboard and
+    // incoming drops.
+    capabilities.drag_source = offered.clipboard;
     capabilities.clipboard_formats = if offered.clipboard {
         vec![
             ClipboardFormat::Text,
@@ -114,13 +114,15 @@ mod tests {
     #[test]
     fn nothing_can_be_dropped_on_a_desktop_with_no_data_device() {
         assert!(!of(Offered::default()).accepts_drops());
-        assert!(
-            of(Offered {
-                clipboard: true,
-                ..Offered::default()
-            })
-            .accepts_drops()
-        );
+        assert!(!of(Offered::default()).drop_mime);
+        assert!(!of(Offered::default()).drag_source);
+        let with_device = of(Offered {
+            clipboard: true,
+            ..Offered::default()
+        });
+        assert!(with_device.accepts_drops());
+        assert!(with_device.drop_mime);
+        assert!(with_device.drag_source);
     }
 
     #[test]

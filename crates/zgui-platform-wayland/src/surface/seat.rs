@@ -8,7 +8,9 @@ use smithay_client_toolkit::seat::pointer::{PointerData, ThemedPointer};
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
     ChangeCause, ZwpTextInputV3,
 };
-use zgui_platform::{CursorStyle, SurfaceId, TextInput, TextInputPurpose, Unsupported};
+use zgui_platform::{
+    CursorStyle, InputSerial, PlatformError, SurfaceId, TextInput, TextInputPurpose, Unsupported,
+};
 
 use crate::input::pointer::cursor;
 use crate::input::text_input;
@@ -46,6 +48,14 @@ struct State {
     over: Option<SurfaceId>,
     /// The serial an interactive drag may quote, which is always from a press.
     grab: Option<u32>,
+    /// Active pointer button press holding an implicit grab: `(surface, button_code, serial)`.
+    ///
+    /// Kept separate from [`Self::grab`] so a keyboard press (such as holding Ctrl before
+    /// crossing a drag threshold) never overwrites the pointer press serial required by
+    /// `wl_data_device.start_drag`.
+    pointer_grab: Option<(SurfaceId, u32, u32)>,
+    /// Active touch contact holding an implicit grab: `(surface, contact_id, serial)`.
+    touch_grab: Option<(SurfaceId, i32, u32)>,
     /// What the pointer currently looks like, so that repeating a shape costs nothing.
     style: Option<CursorStyle>,
     /// The input method, once the compositor has offered one for a seat with a keyboard.
@@ -102,11 +112,53 @@ impl SeatLink {
         }
         inner.style = None;
         inner.over = None;
+        inner.pointer_grab = None;
     }
 
     /// Records the serial an interactive drag may quote.
     pub(crate) fn pressed(&self, serial: u32) {
         self.lock().grab = Some(serial);
+    }
+
+    /// Records a pointer button press on `surface` holding an implicit grab.
+    pub(crate) fn pointer_pressed(&self, surface: SurfaceId, button: u32, serial: u32) {
+        let mut inner = self.lock();
+        inner.grab = Some(serial);
+        inner.pointer_grab = Some((surface, button, serial));
+    }
+
+    /// Releases an active pointer grab when its initiating button comes up.
+    pub(crate) fn pointer_released(&self, button: u32) {
+        let mut inner = self.lock();
+        if inner
+            .pointer_grab
+            .is_some_and(|(_, held_button, _)| held_button == button)
+        {
+            inner.pointer_grab = None;
+        }
+    }
+
+    /// Records a touch contact down on `surface` holding an implicit grab.
+    pub(crate) fn touch_pressed(&self, surface: SurfaceId, id: i32, serial: u32) {
+        let mut inner = self.lock();
+        inner.grab = Some(serial);
+        inner.touch_grab = Some((surface, id, serial));
+    }
+
+    /// Releases an active touch grab when its initiating contact lifts.
+    pub(crate) fn touch_released(&self, id: i32) {
+        let mut inner = self.lock();
+        if inner
+            .touch_grab
+            .is_some_and(|(_, held_id, _)| held_id == id)
+        {
+            inner.touch_grab = None;
+        }
+    }
+
+    /// Clears any active touch grab when the compositor cancels touch contacts.
+    pub(crate) fn touch_cancelled(&self) {
+        self.lock().touch_grab = None;
     }
 
     /// The serial of the latest press, for a request the desktop grants only against one.
@@ -121,6 +173,12 @@ impl SeatLink {
             return;
         }
         inner.over = surface;
+        if inner
+            .pointer_grab
+            .is_some_and(|(grabbed, _, _)| surface != Some(grabbed))
+        {
+            inner.pointer_grab = None;
+        }
         // The next surface to hold the pointer states its own cursor, and the one that lost it
         // must not suppress that by having asked for the same shape earlier.
         inner.style = None;
@@ -293,10 +351,42 @@ impl SeatLink {
         if inner.over != Some(surface) {
             return Err(Unsupported);
         }
-        match (inner.seat.clone(), inner.grab) {
+        let serial = inner
+            .pointer_grab
+            .and_then(|(grabbed, _, serial)| (grabbed == surface).then_some(serial))
+            .or(inner.grab);
+        match (inner.seat.clone(), serial) {
             (Some(seat), Some(serial)) => Ok((seat, serial)),
             _ => Err(Unsupported),
         }
+    }
+
+    /// The press serial a `wl_data_device.start_drag` request from `surface` may quote.
+    ///
+    /// Prefers an explicit `serial` when supplied; otherwise requires an active pointer or touch
+    /// press still bound to `surface`, unaffected by keyboard modifier presses in between.
+    pub fn data_drag_serial(
+        &self,
+        surface: SurfaceId,
+        explicit: Option<InputSerial>,
+    ) -> Result<u32, PlatformError> {
+        if let Some(serial) = explicit {
+            return Ok(serial.raw());
+        }
+        let inner = self.lock();
+        if let Some((grabbed, _, serial)) = inner.pointer_grab
+            && grabbed == surface
+        {
+            return Ok(serial);
+        }
+        if let Some((grabbed, _, serial)) = inner.touch_grab
+            && grabbed == surface
+        {
+            return Ok(serial);
+        }
+        Err(PlatformError::Backend(
+            "starting a drag requires an active pointer or touch press on this surface".to_owned(),
+        ))
     }
 
     /// The state, recovering from a panic on another thread.
@@ -343,5 +433,35 @@ mod tests {
         link.over(Some(first));
         // With the shape forgotten, asking again reaches the seat rather than being suppressed.
         link.set_cursor(first, CursorStyle::Text);
+    }
+
+    #[test]
+    fn keyboard_press_does_not_overwrite_pointer_drag_serial() {
+        let link = SeatLink::default();
+        let surface = SurfaceId::new(1);
+        link.over(Some(surface));
+        link.pointer_pressed(surface, 0x110, 42);
+        // Pressing Ctrl before crossing the drag threshold updates the general press serial,
+        // but must not clobber the pointer implicit-grab serial.
+        link.pressed(99);
+        assert_eq!(link.data_drag_serial(surface, None), Ok(42));
+        assert!(link.data_drag_serial(SurfaceId::new(2), None).is_err());
+
+        link.pointer_released(0x110);
+        assert!(link.data_drag_serial(surface, None).is_err());
+    }
+
+    #[test]
+    fn explicit_serial_and_touch_grab_work_for_data_drag() {
+        let link = SeatLink::default();
+        let surface = SurfaceId::new(3);
+        link.touch_pressed(surface, 7, 108);
+        assert_eq!(link.data_drag_serial(surface, None), Ok(108));
+        link.touch_released(7);
+        assert!(link.data_drag_serial(surface, None).is_err());
+        assert_eq!(
+            link.data_drag_serial(surface, Some(zgui_platform::InputSerial::new(55))),
+            Ok(55)
+        );
     }
 }
