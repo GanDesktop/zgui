@@ -64,12 +64,17 @@ impl Desktop {
     ) -> Result<ClipboardMimeOffer, ClipboardError> {
         let text = self.text(kind)?;
         let revision = self.revisions[kind_index(kind)];
+        let offered_mime_types = vec![
+            "text/plain;charset=utf-8".to_owned(),
+            "text/plain".to_owned(),
+        ];
         let Some(wanted) = mime_types
             .iter()
             .find(|m| matches!(m.as_str(), "text/plain;charset=utf-8" | "text/plain"))
         else {
             return Ok(ClipboardMimeOffer {
                 revision,
+                offered_mime_types,
                 entries: Vec::new(),
             });
         };
@@ -81,6 +86,7 @@ impl Desktop {
         }
         Ok(ClipboardMimeOffer {
             revision,
+            offered_mime_types,
             entries: vec![ClipboardMime::new(wanted.clone(), bytes)],
         })
     }

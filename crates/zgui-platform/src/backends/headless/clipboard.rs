@@ -178,6 +178,11 @@ impl Clipboard for MemoryClipboard {
         if slot.mimes.is_empty() && slot.data.is_none() {
             return Err(ClipboardError::Empty(kind));
         }
+        let offered_mime_types = slot
+            .mimes
+            .iter()
+            .map(|entry| entry.mime_type.clone())
+            .collect();
         let mut total_bytes = 0_usize;
         let mut entries = Vec::new();
         for mime in mime_types {
@@ -193,6 +198,7 @@ impl Clipboard for MemoryClipboard {
         }
         Ok(ClipboardMimeOffer {
             revision: slot.revision,
+            offered_mime_types,
             entries,
         })
     }

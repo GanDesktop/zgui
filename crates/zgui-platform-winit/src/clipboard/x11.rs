@@ -458,6 +458,11 @@ impl Shared {
         if owner == self.win_id {
             let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(held) = &state.held[kind_index(kind)] {
+                let offered_mime_types: Vec<String> = held
+                    .entries
+                    .iter()
+                    .map(|(_, name, _)| name.clone())
+                    .collect();
                 let mut total_bytes = 0_usize;
                 let mut entries = Vec::new();
                 for wanted in mime_types {
@@ -480,7 +485,11 @@ impl Shared {
                         entries.push(ClipboardMime::new(wanted.clone(), bytes.clone()));
                     }
                 }
-                return Ok(ClipboardMimeOffer { revision, entries });
+                return Ok(ClipboardMimeOffer {
+                    revision,
+                    offered_mime_types,
+                    entries,
+                });
             }
         }
 
@@ -501,7 +510,11 @@ impl Shared {
             total_bytes = total_bytes.saturating_add(bytes.len());
             entries.push(ClipboardMime::new(wanted.clone(), bytes));
         }
-        Ok(ClipboardMimeOffer { revision, entries })
+        Ok(ClipboardMimeOffer {
+            revision,
+            offered_mime_types: offered_names,
+            entries,
+        })
     }
 
     fn query_targets(

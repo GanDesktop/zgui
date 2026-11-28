@@ -23,7 +23,7 @@ use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 use zgui_platform::{
     ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardMime,
     ClipboardMimeOffer, ClipboardSerial, DragAction, DragActions, DragSessionId, DragSourceEvent,
-    DragSourceRequest, PlatformError, SurfaceId, Unsupported, Waker,
+    DragSourceRequest, LazyMimeProvider, PlatformError, SurfaceId, Unsupported, Waker,
 };
 
 use crate::clipboard::drag_icon::OutgoingDragIcon;
@@ -77,6 +77,22 @@ struct Inner {
     outgoing_drag: Option<OutgoingDrag>,
 }
 
+/// Stored payload for one advertised clipboard or drag-and-drop MIME type.
+#[derive(Clone)]
+enum MimeSource {
+    Static(Vec<u8>),
+    Lazy(LazyMimeProvider),
+}
+
+impl core::fmt::Debug for MimeSource {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Static(bytes) => formatter.debug_tuple("Static").field(&bytes.len()).finish(),
+            Self::Lazy(_) => formatter.write_str("Lazy(..)"),
+        }
+    }
+}
+
 /// An outgoing native drag session owned by this client until finished or cancelled.
 #[derive(Debug)]
 struct OutgoingDrag {
@@ -85,7 +101,7 @@ struct OutgoingDrag {
     /// Surface that initiated the drag.
     origin: SurfaceId,
     /// Offered payloads keyed by advertised media type.
-    entries: BTreeMap<String, Vec<u8>>,
+    entries: BTreeMap<String, MimeSource>,
     /// The Wayland drag source, kept alive until `dnd_finished`, `cancelled`, or replacement.
     source: DragSource,
     /// Optional drag-icon surface and backing SHM buffer, kept alive for the drag's lifetime.
@@ -116,7 +132,7 @@ struct Primary {
 #[derive(Debug)]
 struct Held {
     /// Offered payloads keyed by advertised media type.
-    entries: BTreeMap<String, Vec<u8>>,
+    entries: BTreeMap<String, MimeSource>,
     /// The source serving these payloads, kept alive for as long as the selection is owned.
     source: Source,
 }
@@ -190,6 +206,8 @@ impl Pending {
 pub struct PendingMime {
     /// Observed offer revision when the pipes were opened.
     revision: u64,
+    /// All MIME types advertised by the observed offer.
+    offered_mime_types: Vec<String>,
     /// Maximum total payload bytes permitted across matched entries.
     max_bytes: usize,
     /// Requested MIME names paired with the pipes serving them.
@@ -202,7 +220,13 @@ impl PendingMime {
         self,
         patience: std::time::Duration,
     ) -> Result<ClipboardMimeOffer, ClipboardError> {
-        finish_mime(self.revision, self.max_bytes, self.readers, patience)
+        finish_mime(
+            self.revision,
+            self.offered_mime_types,
+            self.max_bytes,
+            self.readers,
+            patience,
+        )
     }
 
     /// Waits for all matched MIME pipes on a worker thread, then wakes the loop.
@@ -212,6 +236,7 @@ impl PendingMime {
                 serial,
                 Ok(ClipboardMimeOffer {
                     revision: self.revision,
+                    offered_mime_types: self.offered_mime_types,
                     entries: Vec::new(),
                 }),
             );
@@ -221,8 +246,13 @@ impl PendingMime {
         let started = std::thread::Builder::new()
             .name("zgui-clipboard".to_owned())
             .spawn(move || {
-                let answer =
-                    finish_mime(self.revision, self.max_bytes, self.readers, pipe::PATIENCE);
+                let answer = finish_mime(
+                    self.revision,
+                    self.offered_mime_types,
+                    self.max_bytes,
+                    self.readers,
+                    pipe::PATIENCE,
+                );
                 answering.answer_mime(serial, answer);
             });
         if let Err(error) = started {
@@ -260,6 +290,7 @@ fn finish(
 /// Completes a multi-MIME transfer within one shared deadline and byte budget.
 fn finish_mime(
     revision: u64,
+    offered_mime_types: Vec<String>,
     max_bytes: usize,
     readers: Vec<(String, ReadPipe)>,
     patience: std::time::Duration,
@@ -279,7 +310,11 @@ fn finish_mime(
         total_bytes = total_bytes.saturating_add(bytes.len());
         entries.push(ClipboardMime { mime_type, bytes });
     }
-    Ok(ClipboardMimeOffer { revision, entries })
+    Ok(ClipboardMimeOffer {
+        revision,
+        offered_mime_types,
+        entries,
+    })
 }
 
 impl core::fmt::Debug for Inner {
@@ -373,41 +408,41 @@ impl Selections {
         kind: ClipboardKind,
         format: ClipboardFormat,
     ) -> Option<Result<ClipboardData, ClipboardError>> {
-        let inner = self.lock();
-        let held = inner.held[index(kind)].as_ref()?;
-        let keys: Vec<String> = held.entries.keys().cloned().collect();
-        let result = match format {
-            ClipboardFormat::Text => match mime::best_text(&keys) {
-                Some(key) => {
-                    let bytes = lookup_entry(&held.entries, &key).unwrap_or(&[]);
-                    Ok(ClipboardData::Text(
-                        String::from_utf8_lossy(bytes).into_owned().into(),
-                    ))
-                }
-                None => Err(ClipboardError::UnavailableFormat(format)),
-            },
-            ClipboardFormat::FileList => {
-                match keys
+        let planned = {
+            let inner = self.lock();
+            let held = inner.held[index(kind)].as_ref()?;
+            let keys: Vec<String> = held.entries.keys().cloned().collect();
+            let chosen = match format {
+                ClipboardFormat::Text => mime::best_text(&keys),
+                ClipboardFormat::FileList => keys
                     .iter()
                     .find(|key| key.eq_ignore_ascii_case(mime::URI_LIST))
-                {
-                    Some(key) => {
-                        let bytes = lookup_entry(&held.entries, key).unwrap_or(&[]);
-                        Ok(ClipboardData::FileList(mime::decode_uri_list(bytes)))
-                    }
-                    None => Err(ClipboardError::UnavailableFormat(format)),
-                }
-            }
-            ClipboardFormat::Image => match mime::best_image(&keys) {
+                    .cloned(),
+                ClipboardFormat::Image => mime::best_image(&keys),
+                _ => return Some(Err(ClipboardError::UnsupportedFormat(format))),
+            };
+            match chosen {
                 Some(key) => {
-                    let bytes = lookup_entry(&held.entries, &key).unwrap_or(&[]).to_vec();
-                    Ok(ClipboardData::Image {
-                        media_type: key.into(),
-                        bytes,
-                    })
+                    let source = lookup_entry(&held.entries, &key).map(|(_, src)| src.clone());
+                    Ok((key, source))
                 }
                 None => Err(ClipboardError::UnavailableFormat(format)),
-            },
+            }
+        };
+        let (key, source) = match planned {
+            Ok(pair) => pair,
+            Err(error) => return Some(Err(error)),
+        };
+        let bytes = resolve_source(source, &key).unwrap_or_default();
+        let result = match format {
+            ClipboardFormat::Text => Ok(ClipboardData::Text(
+                String::from_utf8_lossy(&bytes).into_owned().into(),
+            )),
+            ClipboardFormat::FileList => Ok(ClipboardData::FileList(mime::decode_uri_list(&bytes))),
+            ClipboardFormat::Image => Ok(ClipboardData::Image {
+                media_type: key.into(),
+                bytes,
+            }),
             _ => Err(ClipboardError::UnsupportedFormat(format)),
         };
         Some(result)
@@ -420,27 +455,42 @@ impl Selections {
         mime_types: &[String],
         max_bytes: usize,
     ) -> Option<Result<ClipboardMimeOffer, ClipboardError>> {
-        let inner = self.lock();
-        let idx = index(kind);
-        let held = inner.held[idx].as_ref()?;
-        let revision = inner.revisions[idx];
-        let mut total_bytes = 0_usize;
-        let mut entries = Vec::new();
-        for wanted in mime_types {
-            if let Some(bytes) = lookup_entry(&held.entries, wanted) {
-                total_bytes = total_bytes.saturating_add(bytes.len());
-                if total_bytes > max_bytes {
-                    return Some(Err(ClipboardError::Backend(format!(
-                        "clipboard payload exceeds {max_bytes} bytes"
-                    ))));
+        let (revision, offered_mime_types, planned) = {
+            let inner = self.lock();
+            let idx = index(kind);
+            let held = inner.held[idx].as_ref()?;
+            let revision = inner.revisions[idx];
+            let offered_mime_types: Vec<String> = held.entries.keys().cloned().collect();
+            let mut planned = Vec::new();
+            for wanted in mime_types {
+                if let Some((offered_name, source)) = lookup_entry(&held.entries, wanted) {
+                    planned.push((wanted.clone(), offered_name.to_owned(), source.clone()));
                 }
-                entries.push(ClipboardMime {
-                    mime_type: wanted.clone(),
-                    bytes: bytes.to_vec(),
-                });
             }
+            (revision, offered_mime_types, planned)
+        };
+        let mut total_bytes = 0_usize;
+        let mut entries = Vec::with_capacity(planned.len());
+        for (wanted, offered_name, source) in planned {
+            let Some(bytes) = resolve_source(Some(source), &offered_name) else {
+                continue;
+            };
+            total_bytes = total_bytes.saturating_add(bytes.len());
+            if total_bytes > max_bytes {
+                return Some(Err(ClipboardError::Backend(format!(
+                    "clipboard payload exceeds {max_bytes} bytes"
+                ))));
+            }
+            entries.push(ClipboardMime {
+                mime_type: wanted,
+                bytes,
+            });
         }
-        Some(Ok(ClipboardMimeOffer { revision, entries }))
+        Some(Ok(ClipboardMimeOffer {
+            revision,
+            offered_mime_types,
+            entries,
+        }))
     }
 
     /// Gives up ownership of `kind`, because the compositor gave it to somebody else.
@@ -480,12 +530,17 @@ impl Selections {
     /// On a thread, because the destination is another process and a destination that stops
     /// reading would otherwise hold the loop for as long as it liked.
     pub(crate) fn serve(&self, source: &WlDataSource, mime: &str, destination: WritePipe) {
-        let bytes = self.lock().held.iter().flatten().find_map(|held| {
+        let payload = self.lock().held.iter().flatten().find_map(|held| {
             matches!(&held.source, Source::Standard(owned) if owned.inner() == source)
-                .then(|| lookup_entry(&held.entries, mime).map(<[u8]>::to_vec))
+                .then(|| lookup_entry(&held.entries, mime).map(|(_, src)| src.clone()))
                 .flatten()
         });
-        serve_bytes("zgui-clipboard-write", bytes, destination);
+        serve_source(
+            "zgui-clipboard-write",
+            payload,
+            mime.to_owned(),
+            destination,
+        );
     }
 
     /// The same, for the selection clipboard.
@@ -495,12 +550,17 @@ impl Selections {
         mime: &str,
         destination: WritePipe,
     ) {
-        let bytes = self.lock().held.iter().flatten().find_map(|held| {
+        let payload = self.lock().held.iter().flatten().find_map(|held| {
             matches!(&held.source, Source::Primary(owned) if owned.inner() == source)
-                .then(|| lookup_entry(&held.entries, mime).map(<[u8]>::to_vec))
+                .then(|| lookup_entry(&held.entries, mime).map(|(_, src)| src.clone()))
                 .flatten()
         });
-        serve_bytes("zgui-clipboard-write", bytes, destination);
+        serve_source(
+            "zgui-clipboard-write",
+            payload,
+            mime.to_owned(),
+            destination,
+        );
     }
 
     /// Starts an outgoing native drag session from `origin` with `request`.
@@ -515,7 +575,7 @@ impl Selections {
         serial: u32,
         request: DragSourceRequest,
     ) -> Result<DragSessionId, PlatformError> {
-        if request.entries.is_empty() {
+        if request.entries.is_empty() && request.lazy_entries.is_empty() {
             return Err(PlatformError::Backend(
                 "a drag source must offer at least one MIME entry".to_owned(),
             ));
@@ -524,6 +584,10 @@ impl Selections {
             .entries
             .iter()
             .any(|entry| entry.mime_type.is_empty())
+            || request
+                .lazy_entries
+                .iter()
+                .any(|(mime_type, _)| mime_type.is_empty())
         {
             return Err(PlatformError::Backend(
                 "a drag source MIME type must not be empty".to_owned(),
@@ -568,12 +632,19 @@ impl Selections {
         };
 
         let mut map = BTreeMap::new();
-        let mut offered_mimes = Vec::with_capacity(request.entries.len());
+        let mut offered_mimes =
+            Vec::with_capacity(request.entries.len() + request.lazy_entries.len());
         for entry in request.entries {
             if !map.contains_key(&entry.mime_type) {
                 offered_mimes.push(entry.mime_type.clone());
             }
-            map.insert(entry.mime_type, entry.bytes);
+            map.insert(entry.mime_type, MimeSource::Static(entry.bytes));
+        }
+        for (mime_type, provider) in request.lazy_entries {
+            if !map.contains_key(&mime_type) {
+                offered_mimes.push(mime_type.clone());
+            }
+            map.insert(mime_type, MimeSource::Lazy(provider));
         }
 
         // Drop any stale outgoing drag before creating and starting the new one so destruction
@@ -622,7 +693,7 @@ impl Selections {
         mime: &str,
         destination: WritePipe,
     ) -> Result<(), WritePipe> {
-        let bytes = {
+        let payload = {
             let inner = self.lock();
             let Some(drag) = inner
                 .outgoing_drag
@@ -631,9 +702,9 @@ impl Selections {
             else {
                 return Err(destination);
             };
-            lookup_entry(&drag.entries, mime).map(<[u8]>::to_vec)
+            lookup_entry(&drag.entries, mime).map(|(_, src)| src.clone())
         };
-        serve_bytes("zgui-drag-write", bytes, destination);
+        serve_source("zgui-drag-write", payload, mime.to_owned(), destination);
         Ok(())
     }
 
@@ -825,16 +896,17 @@ impl Selections {
     ) -> Result<PendingMime, ClipboardError> {
         let inner = self.lock();
         let revision = inner.revisions[index(kind)];
-        let collect_matches = |offered: &[String]| -> Vec<(String, String)> {
-            mime_types
+        let collect_matches = |offered: &[String]| -> (Vec<String>, Vec<(String, String)>) {
+            let matched = mime_types
                 .iter()
                 .filter_map(|wanted| {
                     mime::match_offered(offered, wanted)
                         .map(|matched| (wanted.clone(), matched.to_owned()))
                 })
-                .collect()
+                .collect();
+            (offered.to_vec(), matched)
         };
-        let readers = match kind {
+        let (offered_mime_types, readers) = match kind {
             ClipboardKind::Primary => {
                 let primary = inner
                     .primary
@@ -845,7 +917,7 @@ impl Selections {
                     .data()
                     .selection_offer()
                     .ok_or(ClipboardError::Empty(kind))?;
-                let matched = offer.with_mime_types(collect_matches);
+                let (offered_mime_types, matched) = offer.with_mime_types(collect_matches);
                 let mut readers = Vec::with_capacity(matched.len());
                 for (wanted, offered_name) in matched {
                     let reader = offer
@@ -853,7 +925,7 @@ impl Selections {
                         .map_err(|error| ClipboardError::Backend(error.to_string()))?;
                     readers.push((wanted, reader));
                 }
-                readers
+                (offered_mime_types, readers)
             }
             _ => {
                 let standard = inner.standard.as_ref().ok_or(ClipboardError::Empty(kind))?;
@@ -862,7 +934,7 @@ impl Selections {
                     .data()
                     .selection_offer()
                     .ok_or(ClipboardError::Empty(kind))?;
-                let matched = offer.with_mime_types(collect_matches);
+                let (offered_mime_types, matched) = offer.with_mime_types(collect_matches);
                 let mut readers = Vec::with_capacity(matched.len());
                 for (wanted, offered_name) in matched {
                     let reader = offer
@@ -870,7 +942,7 @@ impl Selections {
                         .map_err(|error| ClipboardError::Backend(error.to_string()))?;
                     readers.push((wanted, reader));
                 }
-                readers
+                (offered_mime_types, readers)
             }
         };
         if let Some(conn) = &inner.conn {
@@ -878,6 +950,7 @@ impl Selections {
         }
         Ok(PendingMime {
             revision,
+            offered_mime_types,
             max_bytes,
             readers,
         })
@@ -888,6 +961,18 @@ impl Selections {
         &self,
         kind: ClipboardKind,
         entries: &[ClipboardMime],
+        expected_revision: Option<u64>,
+    ) -> Result<(), ClipboardError> {
+        self.take_selection_mime_providers(kind, entries, &[], expected_revision)
+    }
+
+    /// Claims `kind` for this application with eager `entries` and lazy `providers`, or gives it
+    /// up when both are empty.
+    pub(crate) fn take_selection_mime_providers(
+        &self,
+        kind: ClipboardKind,
+        entries: &[ClipboardMime],
+        lazy: &[(String, LazyMimeProvider)],
         expected_revision: Option<u64>,
     ) -> Result<(), ClipboardError> {
         let mut inner = self.lock();
@@ -904,7 +989,7 @@ impl Selections {
             .clone()
             .ok_or_else(|| ClipboardError::Backend("the loop has not started".to_owned()))?;
 
-        let held = if entries.is_empty() {
+        let held = if entries.is_empty() && lazy.is_empty() {
             match kind {
                 ClipboardKind::Primary => {
                     if let Some(primary) = &inner.primary {
@@ -920,12 +1005,21 @@ impl Selections {
             None
         } else {
             let mut map = BTreeMap::new();
-            let mut offered_mimes = Vec::with_capacity(entries.len());
+            let mut offered_mimes = Vec::with_capacity(entries.len() + lazy.len());
             for entry in entries {
                 if !map.contains_key(&entry.mime_type) {
                     offered_mimes.push(entry.mime_type.as_str());
                 }
-                map.insert(entry.mime_type.clone(), entry.bytes.clone());
+                map.insert(
+                    entry.mime_type.clone(),
+                    MimeSource::Static(entry.bytes.clone()),
+                );
+            }
+            for (mime_type, provider) in lazy {
+                if !map.contains_key(mime_type) {
+                    offered_mimes.push(mime_type.as_str());
+                }
+                map.insert(mime_type.clone(), MimeSource::Lazy(Arc::clone(provider)));
             }
             match kind {
                 ClipboardKind::Primary => {
@@ -995,25 +1089,43 @@ impl Selections {
     }
 }
 
-fn lookup_entry<'a>(entries: &'a BTreeMap<String, Vec<u8>>, wanted: &str) -> Option<&'a [u8]> {
+fn lookup_entry<'a>(
+    entries: &'a BTreeMap<String, MimeSource>,
+    wanted: &str,
+) -> Option<(&'a str, &'a MimeSource)> {
     entries
-        .get(wanted)
+        .get_key_value(wanted)
         .or_else(|| {
             entries
                 .iter()
                 .find(|(key, _)| key.eq_ignore_ascii_case(wanted))
-                .map(|(_, value)| value)
         })
-        .map(Vec::as_slice)
+        .map(|(key, value)| (key.as_str(), value))
 }
 
-/// Writes a held selection or drag payload into `destination`, on a thread.
-fn serve_bytes(thread_name: &'static str, bytes: Option<Vec<u8>>, destination: WritePipe) {
+fn resolve_source(source: Option<MimeSource>, mime: &str) -> Option<Vec<u8>> {
+    match source {
+        Some(MimeSource::Static(bytes)) => Some(bytes),
+        Some(MimeSource::Lazy(provider)) => provider(mime),
+        None => None,
+    }
+}
+
+/// Writes a held selection or drag payload into `destination`, evaluating any lazy provider on the
+/// worker thread rather than the Wayland event loop thread.
+fn serve_source(
+    thread_name: &'static str,
+    source: Option<MimeSource>,
+    mime: String,
+    destination: WritePipe,
+) {
     let _ = std::thread::Builder::new()
         .name(thread_name.to_owned())
         .spawn(move || {
-            // A destination asking for a selection this application no longer holds gets an empty
-            // one: closing the pipe with nothing in it is how the protocol says "nothing here".
+            let bytes = resolve_source(source, &mime);
+            // A destination asking for a selection this application no longer holds (or whose lazy
+            // provider declined) gets an empty transfer: closing the pipe with nothing in it is how
+            // the protocol says "nothing here".
             pipe::write(
                 destination,
                 bytes.as_deref().unwrap_or_default(),
@@ -1161,5 +1273,45 @@ mod tests {
         assert_eq!(selections.lock().revisions, [1, 0]);
         selections.selection_changed(ClipboardKind::Primary);
         assert_eq!(selections.lock().revisions, [1, 1]);
+    }
+
+    #[test]
+    fn lazy_mime_source_resolves_only_when_invoked() {
+        use super::{MimeSource, lookup_entry, resolve_source};
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "text/uri-list".to_owned(),
+            MimeSource::Static(b"file:///tmp/a.txt\r\n".to_vec()),
+        );
+        entries.insert(
+            "application/vnd.portal.filetransfer".to_owned(),
+            MimeSource::Lazy(Arc::new(move |mime| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(mime, "application/vnd.portal.filetransfer");
+                Some(b"key-77".to_vec())
+            })),
+        );
+
+        let (_, static_src) = lookup_entry(&entries, "TEXT/URI-LIST").expect("static found");
+        assert_eq!(
+            resolve_source(Some(static_src.clone()), "text/uri-list"),
+            Some(b"file:///tmp/a.txt\r\n".to_vec())
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let (offered, lazy_src) =
+            lookup_entry(&entries, "APPLICATION/VND.PORTAL.FILETRANSFER").expect("lazy found");
+        assert_eq!(offered, "application/vnd.portal.filetransfer");
+        assert_eq!(
+            resolve_source(Some(lazy_src.clone()), offered),
+            Some(b"key-77".to_vec())
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

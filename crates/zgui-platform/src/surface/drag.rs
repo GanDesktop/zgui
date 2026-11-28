@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use zgui_geom::{Css, CssPx, Point};
 pub use zgui_vocab::{DragAction, DragActions, DragDecision, DragMime, DropHandle};
 
-use crate::clipboard::ClipboardMime;
+use crate::clipboard::{ClipboardMime, LazyMimeProvider};
 use crate::surface::{InputSerial, WindowIcon};
 
 impl From<ClipboardMime> for DragMime {
@@ -110,11 +110,14 @@ impl From<WindowIcon> for DragIcon {
 }
 
 /// Everything a surface needs to begin an outgoing native drag session.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct DragSourceRequest {
     /// Advertised MIME payloads in preference order.
     pub entries: Vec<DragMime>,
+    /// Lazily produced MIME payloads advertised alongside [`Self::entries`] and evaluated on
+    /// demand only when a drop target requests them.
+    pub lazy_entries: Vec<(String, LazyMimeProvider)>,
     /// Actions the source permits for this drag.
     pub actions: DragActions,
     /// Optional explicit press token captured on pointer or touch down.
@@ -125,15 +128,47 @@ pub struct DragSourceRequest {
     pub icon: Option<DragIcon>,
 }
 
+impl core::fmt::Debug for DragSourceRequest {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let lazy_mimes: Vec<&str> = self
+            .lazy_entries
+            .iter()
+            .map(|(mime, _)| mime.as_str())
+            .collect();
+        formatter
+            .debug_struct("DragSourceRequest")
+            .field("entries", &self.entries)
+            .field("lazy_mimes", &lazy_mimes)
+            .field("actions", &self.actions)
+            .field("serial", &self.serial)
+            .field("icon", &self.icon)
+            .finish()
+    }
+}
+
 impl DragSourceRequest {
     /// Creates an outgoing drag request carrying `entries` with allowed `actions`.
     pub fn new(entries: Vec<DragMime>, actions: DragActions) -> Self {
         Self {
             entries,
+            lazy_entries: Vec::new(),
             actions,
             serial: None,
             icon: None,
         }
+    }
+
+    /// Advertises an additional `mime_type` whose bytes are produced lazily on demand when a drop
+    /// target requests it.
+    #[must_use]
+    pub fn with_lazy_mime(
+        mut self,
+        mime_type: impl Into<String>,
+        provider: impl Fn(&str) -> Option<Vec<u8>> + Send + Sync + 'static,
+    ) -> Self {
+        self.lazy_entries
+            .push((mime_type.into(), std::sync::Arc::new(provider)));
+        self
     }
 
     /// Quotes an explicit press serial captured when the drag gesture began.
@@ -446,7 +481,19 @@ mod tests {
             vec![DragMime::new("text/plain;charset=utf-8", b"hi")],
             DragActions::COPY,
         )
-        .with_icon(image);
+        .with_icon(image)
+        .with_lazy_mime("application/vnd.portal.filetransfer", |_| {
+            Some(b"transfer-key".to_vec())
+        });
         assert_eq!(request.icon.as_ref().map(|i| i.scale), Some(1));
+        assert_eq!(request.lazy_entries.len(), 1);
+        assert_eq!(
+            request.lazy_entries[0].0,
+            "application/vnd.portal.filetransfer"
+        );
+        assert_eq!(
+            (request.lazy_entries[0].1)("application/vnd.portal.filetransfer"),
+            Some(b"transfer-key".to_vec())
+        );
     }
 }

@@ -84,7 +84,7 @@ pub use crate::app::{AppEvent, AppHandler, IdlePolicy, Install, Park, Parked, Wa
 pub use crate::capabilities::PlatformCapabilities;
 pub use crate::clipboard::{
     Clipboard, ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardMime,
-    ClipboardMimeOffer, ClipboardSerial, ClipboardSerials, ClipboardWriteOptions,
+    ClipboardMimeOffer, ClipboardSerial, ClipboardSerials, ClipboardWriteOptions, LazyMimeProvider,
 };
 pub use crate::clock::{Clock, VirtualClock};
 pub use crate::cx::PlatformCx;

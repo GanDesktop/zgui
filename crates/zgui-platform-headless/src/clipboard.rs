@@ -4,16 +4,30 @@ use std::sync::{Arc, Mutex};
 
 use zgui_platform::{
     Clipboard, ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardMime,
-    ClipboardMimeOffer, ClipboardSerial, ClipboardSerials, ClipboardWriteOptions, WakeReason,
-    Waker,
+    ClipboardMimeOffer, ClipboardSerial, ClipboardSerials, ClipboardWriteOptions, LazyMimeProvider,
+    WakeReason, Waker,
 };
 
 /// One clipboard slot's stored data, MIME payloads, and revision counter.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Slot {
     data: Option<ClipboardData>,
     mimes: Vec<ClipboardMime>,
+    lazy: Vec<(String, LazyMimeProvider)>,
     revision: u64,
+}
+
+impl core::fmt::Debug for Slot {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let lazy_mimes: Vec<&str> = self.lazy.iter().map(|(mime, _)| mime.as_str()).collect();
+        formatter
+            .debug_struct("Slot")
+            .field("data", &self.data)
+            .field("mimes", &self.mimes)
+            .field("lazy_mimes", &lazy_mimes)
+            .field("revision", &self.revision)
+            .finish()
+    }
 }
 
 /// A clipboard that is an ordinary value in memory.
@@ -185,6 +199,7 @@ impl Clipboard for MemoryClipboard {
             .expect("the clipboard is not poisoned");
         slot.revision = slot.revision.saturating_add(1);
         slot.mimes = data_to_mimes(&data);
+        slot.lazy.clear();
         slot.data = Some(data);
         Ok(())
     }
@@ -207,28 +222,104 @@ impl Clipboard for MemoryClipboard {
         mime_types: &[String],
         max_bytes: usize,
     ) -> Result<ClipboardMimeOffer, ClipboardError> {
-        let slot = self
-            .slot(kind)
-            .lock()
-            .expect("the clipboard is not poisoned");
-        if slot.mimes.is_empty() && slot.data.is_none() {
-            return Err(ClipboardError::Empty(kind));
+        enum Planned {
+            Static(ClipboardMime),
+            Lazy {
+                wanted: String,
+                offered: String,
+                provider: LazyMimeProvider,
+            },
         }
-        let mut total_bytes = 0_usize;
-        let mut entries = Vec::new();
-        for mime in mime_types {
-            if let Some(found) = slot.mimes.iter().find(|entry| entry.mime_type == *mime) {
-                total_bytes = total_bytes.saturating_add(found.bytes.len());
-                if total_bytes > max_bytes {
-                    return Err(ClipboardError::Backend(format!(
-                        "clipboard payload exceeds {max_bytes} bytes"
-                    )));
-                }
-                entries.push(found.clone());
+
+        let (revision, offered_mime_types, planned) = {
+            let slot = self
+                .slot(kind)
+                .lock()
+                .expect("the clipboard is not poisoned");
+            if slot.mimes.is_empty() && slot.lazy.is_empty() && slot.data.is_none() {
+                return Err(ClipboardError::Empty(kind));
             }
+            let mut offered_mime_types = Vec::with_capacity(slot.mimes.len() + slot.lazy.len());
+            for entry in &slot.mimes {
+                if !offered_mime_types
+                    .iter()
+                    .any(|seen: &String| seen.eq_ignore_ascii_case(&entry.mime_type))
+                {
+                    offered_mime_types.push(entry.mime_type.clone());
+                }
+            }
+            for (mime_type, _) in &slot.lazy {
+                if !offered_mime_types
+                    .iter()
+                    .any(|seen: &String| seen.eq_ignore_ascii_case(mime_type))
+                {
+                    offered_mime_types.push(mime_type.clone());
+                }
+            }
+
+            let mut planned = Vec::new();
+            for wanted in mime_types {
+                if let Some(found) = slot
+                    .mimes
+                    .iter()
+                    .find(|entry| entry.mime_type == *wanted)
+                    .or_else(|| {
+                        slot.mimes
+                            .iter()
+                            .find(|entry| entry.mime_type.eq_ignore_ascii_case(wanted))
+                    })
+                {
+                    planned.push(Planned::Static(ClipboardMime::new(
+                        wanted.clone(),
+                        found.bytes.clone(),
+                    )));
+                } else if let Some((offered, provider)) = slot
+                    .lazy
+                    .iter()
+                    .find(|(mime_type, _)| mime_type == wanted)
+                    .or_else(|| {
+                        slot.lazy
+                            .iter()
+                            .find(|(mime_type, _)| mime_type.eq_ignore_ascii_case(wanted))
+                    })
+                {
+                    planned.push(Planned::Lazy {
+                        wanted: wanted.clone(),
+                        offered: offered.clone(),
+                        provider: Arc::clone(provider),
+                    });
+                }
+            }
+            (slot.revision, offered_mime_types, planned)
+        };
+
+        let mut total_bytes = 0_usize;
+        let mut entries = Vec::with_capacity(planned.len());
+        for item in planned {
+            let entry = match item {
+                Planned::Static(entry) => entry,
+                Planned::Lazy {
+                    wanted,
+                    offered,
+                    provider,
+                } => {
+                    let Some(bytes) = provider(&offered) else {
+                        continue;
+                    };
+                    ClipboardMime::new(wanted, bytes)
+                }
+            };
+            total_bytes = total_bytes.saturating_add(entry.bytes.len());
+            if total_bytes > max_bytes {
+                return Err(ClipboardError::Backend(format!(
+                    "clipboard payload exceeds {max_bytes} bytes"
+                )));
+            }
+            entries.push(entry);
         }
         Ok(ClipboardMimeOffer {
-            revision: slot.revision,
+            revision,
+            offered_mime_types,
             entries,
         })
     }
@@ -239,6 +330,16 @@ impl Clipboard for MemoryClipboard {
         entries: &[ClipboardMime],
         expected_revision: Option<u64>,
     ) -> Result<(), ClipboardError> {
+        self.write_mime_providers(kind, entries, &[], expected_revision)
+    }
+
+    fn write_mime_providers(
+        &self,
+        kind: ClipboardKind,
+        entries: &[ClipboardMime],
+        lazy: &[(String, LazyMimeProvider)],
+        expected_revision: Option<u64>,
+    ) -> Result<(), ClipboardError> {
         let mut slot = self
             .slot(kind)
             .lock()
@@ -247,12 +348,14 @@ impl Clipboard for MemoryClipboard {
             return Err(ClipboardError::Changed(kind));
         }
         slot.revision = slot.revision.saturating_add(1);
-        if entries.is_empty() {
+        if entries.is_empty() && lazy.is_empty() {
             slot.data = None;
             slot.mimes.clear();
+            slot.lazy.clear();
         } else {
             slot.data = mimes_to_data(entries);
             slot.mimes = entries.to_vec();
+            slot.lazy = lazy.to_vec();
         }
         Ok(())
     }
@@ -265,6 +368,7 @@ impl Clipboard for MemoryClipboard {
         slot.revision = slot.revision.saturating_add(1);
         slot.data = None;
         slot.mimes.clear();
+        slot.lazy.clear();
         Ok(())
     }
 }
@@ -423,5 +527,64 @@ mod tests {
                 ClipboardKind::Standard
             ))
         );
+    }
+
+    #[test]
+    fn lazy_mime_provider_is_advertised_without_being_invoked_until_requested() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use zgui_platform::LazyMimeProvider;
+
+        let clipboard = MemoryClipboard::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider_calls = Arc::clone(&calls);
+        let provider: LazyMimeProvider = Arc::new(move |_| {
+            provider_calls.fetch_add(1, Ordering::SeqCst);
+            Some(b"portal-key-42".to_vec())
+        });
+        let declining: LazyMimeProvider = Arc::new(|_| None);
+
+        clipboard
+            .write_mime_providers(
+                ClipboardKind::Standard,
+                &[zgui_platform::ClipboardMime::new(
+                    "text/uri-list",
+                    b"file:///tmp/a.txt\r\n",
+                )],
+                &[
+                    ("application/vnd.portal.filetransfer".to_owned(), provider),
+                    ("application/x-declined".to_owned(), declining),
+                ],
+                None,
+            )
+            .expect("write with lazy providers succeeds");
+
+        // Probing offered MIME types or reading static MIMEs must never invoke lazy providers.
+        let probe = clipboard
+            .read_mime_blocking(ClipboardKind::Standard, &["text/uri-list".to_owned()], 1024)
+            .expect("probe succeeds");
+        assert!(probe.offers_mime("application/vnd.portal.filetransfer"));
+        assert!(probe.offers_mime("text/uri-list"));
+        assert_eq!(probe.entries.len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        // Explicitly requesting the lazy MIME invokes the provider once.
+        let fetched = clipboard
+            .read_mime_blocking(
+                ClipboardKind::Standard,
+                &[
+                    "application/vnd.portal.filetransfer".to_owned(),
+                    "application/x-declined".to_owned(),
+                ],
+                1024,
+            )
+            .expect("lazy read succeeds");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fetched.entries.len(), 1);
+        assert_eq!(
+            fetched.entries[0].mime_type,
+            "application/vnd.portal.filetransfer"
+        );
+        assert_eq!(fetched.entries[0].bytes, b"portal-key-42");
     }
 }

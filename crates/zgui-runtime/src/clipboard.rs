@@ -20,7 +20,8 @@ use std::task::{Context, Poll, Waker as TaskWaker};
 use rustc_hash::FxHashMap;
 use zgui_platform::{
     ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardMime,
-    ClipboardMimeOffer, ClipboardSerial, ClipboardWriteOptions, PlatformCx, WakeReason, Waker,
+    ClipboardMimeOffer, ClipboardSerial, ClipboardWriteOptions, LazyMimeProvider, PlatformCx,
+    WakeReason, Waker,
 };
 use zgui_reactive::prelude::*;
 use zgui_reactive::{LocalStorage, RwSignal, Signal};
@@ -88,6 +89,19 @@ enum ClipboardRequest {
         kind: ClipboardKind,
         /// Entries to offer on the clipboard (empty clears it).
         entries: Vec<ClipboardMime>,
+        /// Optional compare-and-swap revision.
+        expected_revision: Option<u64>,
+        /// Continuation notified with the write outcome.
+        then: WriteMimeCallback,
+    },
+    /// Replace `kind` with eager `entries` and lazy `providers`, validating `expected_revision`.
+    WriteMimeProviders {
+        /// Which clipboard.
+        kind: ClipboardKind,
+        /// Eager entries to offer on the clipboard.
+        entries: Vec<ClipboardMime>,
+        /// Lazily produced entries evaluated on demand when a peer requests them.
+        lazy: Vec<(String, LazyMimeProvider)>,
         /// Optional compare-and-swap revision.
         expected_revision: Option<u64>,
         /// Continuation notified with the write outcome.
@@ -275,6 +289,29 @@ impl Clipboards {
         OpFuture(slot)
     }
 
+    /// Atomically replaces all offered MIME types on `kind` with eager `entries` and lazily
+    /// generated `lazy` providers, checking `expected_revision` when provided.
+    ///
+    /// When both `entries` and `lazy` are empty, clears the clipboard.
+    pub fn write_mime_with_providers(
+        &self,
+        kind: ClipboardKind,
+        entries: Vec<ClipboardMime>,
+        lazy: Vec<(String, LazyMimeProvider)>,
+        expected_revision: Option<u64>,
+    ) -> impl Future<Output = Result<(), ClipboardError>> + 'static {
+        let slot = OpSlot::new_shared();
+        let complete_slot = Rc::clone(&slot);
+        self.push(ClipboardRequest::WriteMimeProviders {
+            kind,
+            entries,
+            lazy,
+            expected_revision,
+            then: Box::new(move |result| OpSlot::complete(&complete_slot, result)),
+        });
+        OpFuture(slot)
+    }
+
     /// Queues one request and wakes the loop.
     fn push(&self, request: ClipboardRequest) {
         self.inner.borrow_mut().queue.push_back(request);
@@ -326,6 +363,21 @@ impl Clipboards {
                     then,
                 } => {
                     let result = cx.clipboard().write_mime(kind, &entries, expected_revision);
+                    then(result);
+                }
+                ClipboardRequest::WriteMimeProviders {
+                    kind,
+                    entries,
+                    lazy,
+                    expected_revision,
+                    then,
+                } => {
+                    let result = cx.clipboard().write_mime_providers(
+                        kind,
+                        &entries,
+                        &lazy,
+                        expected_revision,
+                    );
                     then(result);
                 }
                 ClipboardRequest::Read { kind, then } => {
@@ -557,9 +609,47 @@ mod tests {
         }
         let offer = ClipboardMimeOffer {
             revision: 4,
+            offered_mime_types: vec!["text/uri-list".to_owned()],
             entries: vec![ClipboardMime::new("text/uri-list", b"file:///tmp/a\r\n")],
         };
         clipboards.resolve_mime(ClipboardSerial::new(11), Ok(offer.clone()));
         assert_eq!(pinned_offer.poll(&mut cx), Poll::Ready(Ok(Some(offer))));
+    }
+
+    #[test]
+    fn write_mime_with_providers_queues_providers_request() {
+        use std::sync::Arc;
+        use zgui_platform::{ClipboardMime, LazyMimeProvider};
+
+        let clipboards = Clipboards::new();
+        let provider: LazyMimeProvider = Arc::new(|_| Some(b"k".to_vec()));
+        let _fut = clipboards.write_mime_with_providers(
+            ClipboardKind::Standard,
+            vec![ClipboardMime::new("text/uri-list", b"file:///tmp/a\r\n")],
+            vec![("application/vnd.portal.filetransfer".to_owned(), provider)],
+            Some(3),
+        );
+        let req = clipboards
+            .inner
+            .borrow_mut()
+            .queue
+            .pop_front()
+            .expect("queued");
+        match req {
+            super::ClipboardRequest::WriteMimeProviders {
+                kind,
+                entries,
+                lazy,
+                expected_revision,
+                ..
+            } => {
+                assert_eq!(kind, ClipboardKind::Standard);
+                assert_eq!(entries.len(), 1);
+                assert_eq!(lazy.len(), 1);
+                assert_eq!(lazy[0].0, "application/vnd.portal.filetransfer");
+                assert_eq!(expected_revision, Some(3));
+            }
+            _ => panic!("expected WriteMimeProviders request"),
+        }
     }
 }

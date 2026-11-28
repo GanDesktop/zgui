@@ -439,6 +439,7 @@ impl State {
         let idx = index(kind);
         let revision = self.revisions[idx];
         if let Some(held) = &self.held[idx] {
+            let offered_mime_types: Vec<String> = held.entries.keys().cloned().collect();
             let mut total_bytes = 0_usize;
             let mut entries = Vec::new();
             for wanted in &mime_types {
@@ -456,21 +457,26 @@ impl State {
                     });
                 }
             }
-            let _ = reply.send(Ok(ClipboardMimeOffer { revision, entries }));
+            let _ = reply.send(Ok(ClipboardMimeOffer {
+                revision,
+                offered_mime_types,
+                entries,
+            }));
             return;
         }
         let Some(seat) = self.any_seat() else {
             let _ = reply.send(Err(ClipboardError::Empty(kind)));
             return;
         };
-        let collect_matches = |offered: &[String]| -> Vec<(String, String)> {
-            mime_types
+        let collect_matches = |offered: &[String]| -> (Vec<String>, Vec<(String, String)>) {
+            let matched = mime_types
                 .iter()
                 .filter_map(|wanted| {
                     mime::match_offered(offered, wanted)
                         .map(|matched| (wanted.clone(), matched.to_owned()))
                 })
-                .collect()
+                .collect();
+            (offered.to_vec(), matched)
         };
         let readers_result = match kind {
             ClipboardKind::Primary => {
@@ -480,7 +486,7 @@ impl State {
                 };
                 match primary.data().selection_offer() {
                     Some(offer) => {
-                        let matched = offer.with_mime_types(collect_matches);
+                        let (offered_mime_types, matched) = offer.with_mime_types(collect_matches);
                         matched
                             .into_iter()
                             .map(|(wanted, offered_name)| {
@@ -490,6 +496,7 @@ impl State {
                                     .map_err(|err| ClipboardError::Backend(err.to_string()))
                             })
                             .collect::<Result<Vec<_>, _>>()
+                            .map(|readers| (offered_mime_types, readers))
                     }
                     None => Err(ClipboardError::Empty(kind)),
                 }
@@ -501,7 +508,7 @@ impl State {
                 };
                 match standard.data().selection_offer() {
                     Some(offer) => {
-                        let matched = offer.with_mime_types(collect_matches);
+                        let (offered_mime_types, matched) = offer.with_mime_types(collect_matches);
                         matched
                             .into_iter()
                             .map(|(wanted, offered_name)| {
@@ -511,13 +518,14 @@ impl State {
                                     .map_err(|err| ClipboardError::Backend(err.to_string()))
                             })
                             .collect::<Result<Vec<_>, _>>()
+                            .map(|readers| (offered_mime_types, readers))
                     }
                     None => Err(ClipboardError::Empty(kind)),
                 }
             }
         };
-        let readers = match readers_result {
-            Ok(readers) => readers,
+        let (offered_mime_types, readers) = match readers_result {
+            Ok(pair) => pair,
             Err(error) => {
                 let _ = reply.send(Err(error));
                 return;
@@ -526,6 +534,7 @@ impl State {
         if readers.is_empty() {
             let _ = reply.send(Ok(ClipboardMimeOffer {
                 revision,
+                offered_mime_types,
                 entries: Vec::new(),
             }));
             return;
@@ -553,7 +562,11 @@ impl State {
                         }
                     }
                 }
-                let _ = reply.send(Ok(ClipboardMimeOffer { revision, entries }));
+                let _ = reply.send(Ok(ClipboardMimeOffer {
+                    revision,
+                    offered_mime_types,
+                    entries,
+                }));
             });
     }
 

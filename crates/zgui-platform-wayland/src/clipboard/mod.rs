@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use zgui_platform::{
     Clipboard, ClipboardData, ClipboardError, ClipboardFormat, ClipboardKind, ClipboardMime,
-    ClipboardMimeOffer, ClipboardSerial, ClipboardSerials, ClipboardWriteOptions, WakeReason,
+    ClipboardMimeOffer, ClipboardSerial, ClipboardSerials, ClipboardWriteOptions, LazyMimeProvider,
+    WakeReason,
 };
 
 /// The compositor's data device, seen as the two clipboards a desktop has.
@@ -176,6 +177,17 @@ impl Clipboard for WaylandClipboard {
     ) -> Result<(), ClipboardError> {
         self.selections
             .take_selection_mime(kind, entries, expected_revision)
+    }
+
+    fn write_mime_providers(
+        &self,
+        kind: ClipboardKind,
+        entries: &[ClipboardMime],
+        lazy: &[(String, LazyMimeProvider)],
+        expected_revision: Option<u64>,
+    ) -> Result<(), ClipboardError> {
+        self.selections
+            .take_selection_mime_providers(kind, entries, lazy, expected_revision)
     }
 
     fn clear(&self, kind: ClipboardKind) -> Result<(), ClipboardError> {

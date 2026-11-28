@@ -6,7 +6,7 @@ mod serial;
 
 pub use crate::clipboard::data::{
     ClipboardData, ClipboardFormat, ClipboardKind, ClipboardMime, ClipboardMimeOffer,
-    ClipboardWriteOptions,
+    ClipboardWriteOptions, LazyMimeProvider,
 };
 pub use crate::clipboard::error::ClipboardError;
 pub use crate::clipboard::serial::{ClipboardSerial, ClipboardSerials};
@@ -90,6 +90,22 @@ pub trait Clipboard {
         expected_revision: Option<u64>,
     ) -> Result<(), ClipboardError>;
 
+    /// Atomically replaces all offered MIME types on `kind` with eager `entries` and on-demand
+    /// `lazy` providers, checking `expected_revision` when provided.
+    ///
+    /// Backends that do not support on-demand serving fall back to [`Self::write_mime`] with
+    /// `entries` alone. When both `entries` and `lazy` are empty, clears the clipboard.
+    fn write_mime_providers(
+        &self,
+        kind: ClipboardKind,
+        entries: &[ClipboardMime],
+        lazy: &[(String, LazyMimeProvider)],
+        expected_revision: Option<u64>,
+    ) -> Result<(), ClipboardError> {
+        let _ = lazy;
+        self.write_mime(kind, entries, expected_revision)
+    }
+
     /// Empties the clipboard.
     fn clear(&self, kind: ClipboardKind) -> Result<(), ClipboardError>;
 }
@@ -166,9 +182,14 @@ mod tests {
             let wants_text = mime_types
                 .iter()
                 .find(|mime| matches!(mime.as_str(), "text/plain;charset=utf-8" | "text/plain"));
+            let offered_mime_types = vec![
+                "text/plain;charset=utf-8".to_owned(),
+                "text/plain".to_owned(),
+            ];
             let Some(mime) = wants_text else {
                 return Ok(ClipboardMimeOffer {
                     revision: 1,
+                    offered_mime_types,
                     entries: Vec::new(),
                 });
             };
@@ -179,6 +200,7 @@ mod tests {
             }
             Ok(ClipboardMimeOffer {
                 revision: 1,
+                offered_mime_types,
                 entries: vec![ClipboardMime::new(mime.clone(), text.to_vec())],
             })
         }

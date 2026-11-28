@@ -1,6 +1,7 @@
 //! What is on a clipboard, and which of the several clipboards it is on.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use zgui_vocab::SharedString;
 
@@ -120,13 +121,32 @@ impl ClipboardMime {
     }
 }
 
+/// On-demand byte producer invoked on a background transfer thread when a peer requests a lazily
+/// advertised clipboard or drag-and-drop MIME type.
+///
+/// Returning `None` closes the peer transfer cleanly with empty data so the receiver can fall back
+/// to another advertised MIME type.
+pub type LazyMimeProvider = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
+
 /// Matched MIME payloads read atomically from a single clipboard offer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClipboardMimeOffer {
     /// Monotonic revision of the observed clipboard offer for this clipboard kind.
     pub revision: u64,
+    /// All media types advertised by the observed offer, reported without triggering transfers for
+    /// unrequested MIME types.
+    pub offered_mime_types: Vec<String>,
     /// Matched payloads in request order.
     pub entries: Vec<ClipboardMime>,
+}
+
+impl ClipboardMimeOffer {
+    /// Whether the observed offer advertised `mime_type` (ASCII case-insensitive).
+    pub fn offers_mime(&self, mime_type: &str) -> bool {
+        self.offered_mime_types
+            .iter()
+            .any(|offered| offered.eq_ignore_ascii_case(mime_type))
+    }
 }
 
 /// How a write should be treated by the desktop.
@@ -194,9 +214,16 @@ mod tests {
     fn mime_offer_carries_revision_and_entries() {
         let offer = ClipboardMimeOffer {
             revision: 7,
+            offered_mime_types: vec![
+                "image/png".to_owned(),
+                "application/vnd.portal.filetransfer".to_owned(),
+            ],
             entries: vec![ClipboardMime::new("image/png", [1_u8, 2, 3])],
         };
         assert_eq!(offer.revision, 7);
+        assert!(offer.offers_mime("IMAGE/PNG"));
+        assert!(offer.offers_mime("application/vnd.portal.filetransfer"));
+        assert!(!offer.offers_mime("text/uri-list"));
         assert_eq!(offer.entries.len(), 1);
         assert_eq!(offer.entries[0].mime_type, "image/png");
         assert_eq!(offer.entries[0].bytes, [1, 2, 3]);

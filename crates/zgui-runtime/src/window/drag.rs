@@ -67,12 +67,23 @@ impl DragOver {
         })
     }
 
-    fn offers_files(&self) -> bool {
-        !self.paths.is_empty()
+    fn preferred_file_mime(&self) -> Option<&'static str> {
+        if !self.paths.is_empty()
             || self
                 .mime_types
                 .iter()
                 .any(|mime| mime.eq_ignore_ascii_case("text/uri-list"))
+        {
+            Some("text/uri-list")
+        } else if self
+            .mime_types
+            .iter()
+            .any(|mime| mime.eq_ignore_ascii_case("application/vnd.portal.filetransfer"))
+        {
+            Some("application/vnd.portal.filetransfer")
+        } else {
+            None
+        }
     }
 }
 
@@ -212,8 +223,10 @@ impl Window {
             && let Some(offer) = self.drag.offer
         {
             let decision = over_decision.or(enter_decision).unwrap_or_else(|| {
-                if (over_prevented || enter_prevented) && self.drag.offers_files() {
-                    DragDecision::accept("text/uri-list", DragActions::COPY, Some(DragAction::Copy))
+                if (over_prevented || enter_prevented)
+                    && let Some(mime) = self.drag.preferred_file_mime()
+                {
+                    DragDecision::accept(mime, DragActions::COPY, Some(DragAction::Copy))
                 } else {
                     DragDecision::reject()
                 }

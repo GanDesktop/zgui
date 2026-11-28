@@ -348,9 +348,18 @@ impl DropEvent {
             .any(|offered| offered.eq_ignore_ascii_case(mime_type))
     }
 
-    /// Whether the drag carries or advertises local files (`text/uri-list`).
+    /// Whether the drag source advertised an XDG Document Portal file transfer
+    /// (`application/vnd.portal.filetransfer`).
+    pub fn offers_portal_file_transfer(&self) -> bool {
+        self.offers_mime("application/vnd.portal.filetransfer")
+    }
+
+    /// Whether the drag carries or advertises files (`text/uri-list` or
+    /// `application/vnd.portal.filetransfer`).
     pub fn offers_files(&self) -> bool {
-        !self.paths.is_empty() || self.offers_mime("text/uri-list")
+        !self.paths.is_empty()
+            || self.offers_mime("text/uri-list")
+            || self.offers_portal_file_transfer()
     }
 
     /// Preferred plain-text MIME type advertised by the drag source, preserving the peer's exact
@@ -522,6 +531,11 @@ mod tests {
         assert!(event.offers_image());
         assert_eq!(event.best_image_mime(), Some("image/png"));
         assert!(!event.offers_files());
+        assert!(!event.offers_portal_file_transfer());
+
+        event.mime_types = vec!["application/vnd.portal.filetransfer".to_owned()];
+        assert!(event.offers_portal_file_transfer());
+        assert!(event.offers_files());
 
         event.payload = Some(DragMime::new("image/png", vec![0x89, b'P', b'N', b'G']));
         assert_eq!(
